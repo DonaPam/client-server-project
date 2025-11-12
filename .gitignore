@@ -1,0 +1,21 @@
+#fichiers compiles
+bin/
+*.o
+*.so
+*.a
+
+#executables
+server
+
+#Fichiers de compilation
+*.out
+*.log
+
+#Fichier temporaires
+*~
+~.tmp
+
+#Dossier system
+.DS_store'
+Thumbs.db
+
