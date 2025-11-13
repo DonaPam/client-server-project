@@ -25,7 +25,7 @@ int calculateShortestPath(const GraphRequest& request, vector<vector<int>>& inci
 }
 
 int main() {
-    cout << "=== Graph Calculation Server ===" << endl;
+    cout << "Graph Calculation Server" << endl;
     
     // Socket setup
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
