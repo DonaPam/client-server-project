@@ -14,93 +14,68 @@ using namespace std;
 const int PORT = 8080;
 const char* SERVER_IP = "127.0.0.1";
 
-// Function to generate a random connected graph based on user parameters
-void generateRandomGraphFromInput(GraphRequest& request, vector<int>& matrix_data) {
-    cout << "GRAPH CONFIGURATION " << endl;
+// Fonction pour générer un graphe pondéré aléatoire
+void generateWeightedRandomGraph(GraphRequest& request, vector<int>& matrix_data, vector<int>& edgeWeights) {
+    cout << "=== WEIGHTED GRAPH CONFIGURATION ===" << endl;
     
-    // User input for graph size
+    // Saisie utilisateur
     cout << "Enter number of vertices (minimum 6): ";
     cin >> request.vertices;
     
     cout << "Enter number of edges (minimum 6): ";
     cin >> request.edges;
     
-    // Input validation
-    if (request.vertices < 6) {
-        cout << "Warning: Using minimum 6 vertices" << endl;
-        request.vertices = 6;
-    }
-    
-    if (request.edges < 6) {
-        cout << "Warning: Using minimum 6 edges" << endl;
-        request.edges = 6;
-    }
-    
-    // User input for start and end nodes
     cout << "Enter start node (0 to " << request.vertices - 1 << "): ";
     cin >> request.start_node;
     
-    cout << "Enter end node (0 to " << request.vertices - 1 << "): ";
+    cout << "Enter end node (0 to " << request.vertices - 1 << "): ");
     cin >> request.end_node;
     
-    // Validate nodes
-    if (request.start_node < 0 || request.start_node >= request.vertices) {
-        request.start_node = 0;
-        cout << "Invalid start node, using 0" << endl;
-    }
-    
-    if (request.end_node < 0 || request.end_node >= request.vertices) {
-        request.end_node = request.vertices - 1;
-        cout << "Invalid end node, using " << request.end_node << endl;
-    }
+    // Validation
+    request.vertices = max(6, request.vertices);
+    request.edges = max(6, request.edges);
+    request.start_node = max(0, min(request.vertices - 1, request.start_node));
+    request.end_node = max(0, min(request.vertices - 1, request.end_node));
     
     if (request.start_node == request.end_node) {
         request.end_node = (request.start_node + 1) % request.vertices;
-        cout << "Start and end nodes are same, using end node: " << request.end_node << endl;
     }
     
-    cout << "\nGraph parameters configured:" << endl;
+    request.weighted = 1; // Graphe pondéré
+    
+    cout << "\nGraph parameters:" << endl;
     cout << " - Vertices: " << request.vertices << endl;
     cout << " - Edges: " << request.edges << endl;
     cout << " - Path: " << request.start_node << " -> " << request.end_node << endl;
+    cout << " - Weighted: Yes" << endl;
     
-    // Random number generator
+    // Générateur aléatoire
     random_device rd;
     mt19937 gen(rd());
     uniform_int_distribution<> vertex_dist(0, request.vertices - 1);
+    uniform_int_distribution<> weight_dist(1, 10); // Poids entre 1 et 10
     
-    // Initialize incidence matrix with zeros
+    // Initialisation de la matrice
     vector<vector<int>> incidenceMatrix(request.vertices, vector<int>(request.edges, 0));
     
-    cout << "\nGenerating random connections..." << endl;
+    cout << "\nGenerating random weighted graph..." << endl;
     
-    // Generate a connected graph
-    // Step 1: Create a spanning tree to ensure connectivity
+    // Étape 1: Créer un arbre couvrant pour assurer la connectivité
     vector<bool> connected(request.vertices, false);
     connected[0] = true;
-    int connected_count = 1;
     
     for (int edge = 0; edge < request.vertices - 1 && edge < request.edges; edge++) {
         int connected_vertex, new_vertex;
         
-        // Find a connected vertex
-        do {
-            connected_vertex = vertex_dist(gen);
-        } while (!connected[connected_vertex]);
+        do { connected_vertex = vertex_dist(gen); } while (!connected[connected_vertex]);
+        do { new_vertex = vertex_dist(gen); } while (connected[new_vertex]);
         
-        // Find a non-connected vertex
-        do {
-            new_vertex = vertex_dist(gen);
-        } while (connected[new_vertex]);
-        
-        // Connect them
         incidenceMatrix[connected_vertex][edge] = 1;
         incidenceMatrix[new_vertex][edge] = 1;
         connected[new_vertex] = true;
-        connected_count++;
     }
     
-    // Step 2: Add remaining edges randomly between any two distinct vertices
+    // Étape 2: Ajouter les arêtes restantes
     for (int edge = request.vertices - 1; edge < request.edges; edge++) {
         int v1, v2;
         int attempts = 0;
@@ -109,79 +84,61 @@ void generateRandomGraphFromInput(GraphRequest& request, vector<int>& matrix_dat
             v1 = vertex_dist(gen);
             v2 = vertex_dist(gen);
             attempts++;
-            
-            // Avoid infinite loop
-            if (attempts > 100) {
-                cout << "Warning: Could not find valid edge connection after 100 attempts" << endl;
-                break;
-            }
-        } while (v1 == v2);
+        } while (v1 == v2 && attempts < 100);
         
         incidenceMatrix[v1][edge] = 1;
         incidenceMatrix[v2][edge] = 1;
     }
     
-    // Validate the matrix
-    cout << "Validating incidence matrix..." << endl;
-    int valid_edges = 0;
+    // Génération des poids aléatoires
+    edgeWeights.resize(request.edges);
+    for (int i = 0; i < request.edges; i++) {
+        edgeWeights[i] = weight_dist(gen);
+    }
+    
+    // Validation et correction
     for (int edge = 0; edge < request.edges; edge++) {
-        int connection_count = 0;
+        int connections = 0;
         for (int vertex = 0; vertex < request.vertices; vertex++) {
-            if (incidenceMatrix[vertex][edge] == 1) {
-                connection_count++;
+            if (incidenceMatrix[vertex][edge] == 1) connections++;
+        }
+        
+        // Corriger si nécessaire
+        while (connections < 2) {
+            int vertex = vertex_dist(gen);
+            if (incidenceMatrix[vertex][edge] == 0) {
+                incidenceMatrix[vertex][edge] = 1;
+                connections++;
             }
         }
-        if (connection_count == 2) {
-            valid_edges++;
-        } else {
-            cout << "Edge " << edge << " has " << connection_count << " connections (fixing...)" << endl;
-            // Fix invalid edges by ensuring exactly 2 connections
-            int current_connections = 0;
-            for (int vertex = 0; vertex < request.vertices && current_connections < 2; vertex++) {
-                if (incidenceMatrix[vertex][edge] == 1) {
-                    current_connections++;
-                }
-            }
-            // Add missing connections
-            for (int vertex = 0; vertex < request.vertices && current_connections < 2; vertex++) {
-                if (incidenceMatrix[vertex][edge] == 0) {
-                    incidenceMatrix[vertex][edge] = 1;
-                    current_connections++;
-                }
-            }
-            // Remove excess connections
-            for (int vertex = 0; vertex < request.vertices && current_connections > 2; vertex++) {
-                if (incidenceMatrix[vertex][edge] == 1) {
-                    incidenceMatrix[vertex][edge] = 0;
-                    current_connections--;
-                }
+        while (connections > 2) {
+            int vertex = vertex_dist(gen);
+            if (incidenceMatrix[vertex][edge] == 1) {
+                incidenceMatrix[vertex][edge] = 0;
+                connections--;
             }
         }
     }
     
-    cout << "Matrix validation completed: " << valid_edges << "/" << request.edges << " edges valid" << endl;
-    
-    // Display the generated matrix (optional - can be commented out for large graphs)
+    // Affichage pour les petits graphes
     if (request.vertices <= 10 && request.edges <= 15) {
-        cout << "\nGenerated incidence matrix:" << endl;
+        cout << "\nGenerated incidence matrix with weights:" << endl;
         cout << "   ";
         for (int j = 0; j < request.edges; j++) {
-            cout << "E" << j << " ";
+            cout << "E" << j << "(W" << edgeWeights[j] << ") ";
         }
         cout << endl;
         
         for (int i = 0; i < request.vertices; i++) {
             cout << "V" << i << " ";
             for (int j = 0; j < request.edges; j++) {
-                cout << " " << incidenceMatrix[i][j] << " ";
+                cout << "  " << incidenceMatrix[i][j] << "   ";
             }
             cout << endl;
         }
-    } else {
-        cout << "Graph too large for matrix display" << endl;
     }
     
-    // Flatten matrix for transmission
+    // Applatissement de la matrice
     matrix_data.clear();
     for (const auto& row : incidenceMatrix) {
         for (int val : row) {
@@ -189,69 +146,13 @@ void generateRandomGraphFromInput(GraphRequest& request, vector<int>& matrix_dat
         }
     }
     
-    cout << "Random graph generation completed successfully" << endl;
-}
-
-// Function to use the predefined 6x6 test matrix
-void usePredefinedTestGraph(GraphRequest& request, vector<int>& matrix_data) {
-    cout << "Using predefined 6x6 test graph..." << endl;
-    
-    request.vertices = 6;
-    request.edges = 6;
-    request.start_node = 0;
-    request.end_node = 5;
-    
-    // Predefined valid 6x6 incidence matrix
-    vector<vector<int>> test_matrix = {
-        {1, 1, 0, 0, 0, 0},  // V0: edges 0,1
-        {1, 0, 1, 0, 0, 0},  // V1: edges 0,2
-        {0, 1, 1, 1, 0, 0},  // V2: edges 1,2,3
-        {0, 0, 0, 1, 1, 0},  // V3: edges 3,4
-        {0, 0, 0, 0, 1, 1},  // V4: edges 4,5
-        {0, 0, 0, 0, 0, 1}   // V5: edge 5
-    };
-    
-    cout << "Predefined graph parameters:" << endl;
-    cout << " - Vertices: " << request.vertices << endl;
-    cout << " - Edges: " << request.edges << endl;
-    cout << " - Path: " << request.start_node << " -> " << request.end_node << endl;
-    
-    // Display the matrix
-    cout << "\nPredefined incidence matrix:" << endl;
-    cout << "   ";
-    for (int j = 0; j < request.edges; j++) {
-        cout << "E" << j << " ";
-    }
-    cout << endl;
-    
-    for (int i = 0; i < request.vertices; i++) {
-        cout << "V" << i << " ";
-        for (int j = 0; j < request.edges; j++) {
-            cout << " " << test_matrix[i][j] << " ";
-        }
-        cout << endl;
-    }
-    
-    // Flatten matrix for transmission
-    matrix_data.clear();
-    for (const auto& row : test_matrix) {
-        for (int val : row) {
-            matrix_data.push_back(val);
-        }
-    }
+    cout << "Weighted graph generation completed" << endl;
 }
 
 int main() {
-    cout << "Graph Client - Hybrid Input " << endl;
+    cout << "=== Weighted Graph Client ===" << endl;
     
-    int choice;
-    cout << "\nChoose graph input method:" << endl;
-    cout << "1. Custom graph with random connections" << endl;
-    cout << "2. Predefined 6x6 test graph" << endl;
-    cout << "Enter your choice (1 or 2): ";
-    cin >> choice;
-    
-    // Socket configuration
+    // Configuration socket
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == -1) {
         perror("socket() failed");
@@ -269,8 +170,8 @@ int main() {
         return 1;
     }
     
-    // Connection to server
-    cout << "\nConnecting to server..." << endl;
+    // Connexion au serveur
+    cout << "Connecting to server..." << endl;
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("connect() failed");
         close(sock);
@@ -278,20 +179,17 @@ int main() {
     }
     cout << "Connected to server successfully!" << endl;
     
-    // Generate graph based on user choice
+    // Génération du graphe pondéré
     GraphRequest request;
     vector<int> matrix_data;
+    vector<int> edgeWeights;
     
-    if (choice == 1) {
-        generateRandomGraphFromInput(request, matrix_data);
-    } else {
-        usePredefinedTestGraph(request, matrix_data);
-    }
+    generateWeightedRandomGraph(request, matrix_data, edgeWeights);
     
-    // Send data to server
+    // Envoi des données au serveur
     cout << "\nSending graph data to server..." << endl;
     
-    // Send header
+    // En-tête
     ssize_t bytes_sent = send(sock, &request, sizeof(request), 0);
     if (bytes_sent != sizeof(request)) {
         perror("Error sending request header");
@@ -300,24 +198,44 @@ int main() {
     }
     cout << "Header sent (" << bytes_sent << " bytes)" << endl;
     
-    // Send matrix
+    // Matrice d'incidence
     bytes_sent = send(sock, matrix_data.data(), matrix_data.size() * sizeof(int), 0);
     if (bytes_sent != matrix_data.size() * sizeof(int)) {
         perror("Error sending matrix data");
         close(sock);
         return 1;
     }
-    cout << "Matrix data sent (" << bytes_sent << " bytes)" << endl;
+    cout << "Matrix sent (" << bytes_sent << " bytes)" << endl;
     
-    // Receive response
+    // Poids des arêtes
+    bytes_sent = send(sock, edgeWeights.data(), edgeWeights.size() * sizeof(int), 0);
+    if (bytes_sent != edgeWeights.size() * sizeof(int)) {
+        perror("Error sending weight data");
+        close(sock);
+        return 1;
+    }
+    cout << "Weights sent (" << bytes_sent << " bytes)" << endl;
+    
+    // Réception de la réponse
     cout << "Waiting for server response..." << endl;
     GraphResponse response;
     ssize_t bytes_read = recv(sock, &response, sizeof(response), 0);
     
     if (bytes_read == sizeof(response)) {
-        cout << "\n CALCULATION RESULT " << endl;
+        cout << "\n=== CALCULATION RESULT ===" << endl;
         cout << "Message: " << response.message << endl;
         cout << "Path length: " << response.path_length << endl;
+        cout << "Path size: " << response.path_size << " vertices" << endl;
+        
+        if (response.path_size > 0) {
+            cout << "Complete path: ";
+            for (int i = 0; i < response.path_size; i++) {
+                cout << response.path[i];
+                if (i < response.path_size - 1) cout << " -> ";
+            }
+            cout << endl;
+        }
+        
         cout << "Status: " << (response.error_code == 0 ? "Success" : "Error") << endl;
     } else {
         cout << "Incomplete response from server" << endl;
