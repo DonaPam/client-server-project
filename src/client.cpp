@@ -16,7 +16,7 @@ const char* SERVER_IP = "127.0.0.1";
 
 // Function to generate a random connected graph based on user parameters
 void generateRandomGraphFromInput(GraphRequest& request, vector<int>& matrix_data) {
-    cout << "=== GRAPH CONFIGURATION ===" << endl;
+    cout << "GRAPH CONFIGURATION " << endl;
     
     // User input for graph size
     cout << "Enter number of vertices (minimum 6): ";
@@ -242,7 +242,7 @@ void usePredefinedTestGraph(GraphRequest& request, vector<int>& matrix_data) {
 }
 
 int main() {
-    cout << "=== Graph Client - Hybrid Input ===" << endl;
+    cout << "Graph Client - Hybrid Input " << endl;
     
     int choice;
     cout << "\nChoose graph input method:" << endl;
