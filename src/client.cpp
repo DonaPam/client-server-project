@@ -315,7 +315,7 @@ int main() {
     ssize_t bytes_read = recv(sock, &response, sizeof(response), 0);
     
     if (bytes_read == sizeof(response)) {
-        cout << "\n=== CALCULATION RESULT ===" << endl;
+        cout << "\n CALCULATION RESULT " << endl;
         cout << "Message: " << response.message << endl;
         cout << "Path length: " << response.path_length << endl;
         cout << "Status: " << (response.error_code == 0 ? "Success" : "Error") << endl;
