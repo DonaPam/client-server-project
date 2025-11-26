@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <algorithm>
 #include <sstream>
+#include <functional>
 
 #define MAX_CLIENTS 3
 #define BUFFER_SIZE 1024
@@ -19,17 +20,17 @@
 struct GraphRequest {
     int num_vertices;
     int num_edges;
-    std::vector<std::vector<int>> incidence_matrix;
-    std::vector<double> edge_weights;
     int start_vertex;
     int end_vertex;
+    // Les matrices seront sérialisées séparément
 };
 
 struct GraphResponse {
     double path_length;
-    std::vector<int> path_vertices;
+    int path_size;
     bool success;
-    std::string error_message;
+    char error_message[256];
+    // Les sommets du chemin seront sérialisés séparément
 };
 
 class Graph {
@@ -50,7 +51,7 @@ public:
         
         dist[start] = 0;
         
-        // Create adjacency list from incidence matrix
+        // Créer la liste d'adjacence à partir de la matrice d'incidence
         std::vector<std::vector<std::pair<int, double>>> adj(num_vertices);
         for (int e = 0; e < num_edges; e++) {
             int u = -1, v = -1;
@@ -66,7 +67,7 @@ public:
             }
         }
         
-        // Priority queue: (distance, vertex)
+        // File de priorité: (distance, sommet)
         std::priority_queue<std::pair<double, int>, 
                           std::vector<std::pair<double, int>>,
                           std::greater<std::pair<double, int>>> pq;
@@ -94,7 +95,7 @@ public:
             }
         }
         
-        // Reconstruct path
+        // Reconstruire le chemin
         std::vector<int> path;
         if (dist[end] == std::numeric_limits<double>::infinity()) {
             return {std::numeric_limits<double>::infinity(), path};
@@ -117,76 +118,120 @@ private:
     pthread_t client_threads[MAX_CLIENTS];
     int client_count;
 
+    // Structure pour passer les données aux threads
+    struct ThreadData {
+        Server* server;
+        int client_socket;
+        struct sockaddr_in client_addr;
+        socklen_t client_len;
+    };
+
     void handle_tcp_client(int client_socket) {
-        char buffer[BUFFER_SIZE];
+        std::cout << "Handling TCP client..." << std::endl;
         
-        // Receive graph data
+        // Recevoir la requête de base
         GraphRequest request;
-        recv(client_socket, &request, sizeof(request), 0);
+        ssize_t bytes_received = recv(client_socket, &request, sizeof(request), 0);
         
-        // Process request
-        GraphResponse response = process_graph_request(request);
+        if (bytes_received <= 0) {
+            std::cerr << "Error receiving request from TCP client" << std::endl;
+            close(client_socket);
+            return;
+        }
+
+        // Recevoir la matrice d'incidence
+        std::vector<std::vector<int>> incidence_matrix(request.num_vertices, 
+                                                     std::vector<int>(request.num_edges));
+        std::vector<double> edge_weights(request.num_edges);
+
+        for (int i = 0; i < request.num_vertices; i++) {
+            recv(client_socket, incidence_matrix[i].data(), request.num_edges * sizeof(int), 0);
+        }
         
-        // Send response
+        // Recevoir les poids
+        recv(client_socket, edge_weights.data(), request.num_edges * sizeof(double), 0);
+
+        // Traiter la requête
+        Graph graph(request.num_vertices, request.num_edges, incidence_matrix, edge_weights);
+        auto result = graph.dijkstra(request.start_vertex, request.end_vertex);
+
+        // Préparer la réponse
+        GraphResponse response;
+        response.path_length = result.first;
+        response.path_size = result.second.size();
+        response.success = (result.first != std::numeric_limits<double>::infinity());
+        
+        if (!response.success) {
+            strncpy(response.error_message, "No path exists between the specified vertices", 
+                   sizeof(response.error_message));
+        } else {
+            response.error_message[0] = '\0';
+        }
+
+        // Envoyer la réponse de base
         send(client_socket, &response, sizeof(response), 0);
         
+        // Envoyer le chemin si existe
+        if (response.success && response.path_size > 0) {
+            send(client_socket, result.second.data(), response.path_size * sizeof(int), 0);
+        }
+
         close(client_socket);
+        std::cout << "TCP client handled successfully" << std::endl;
     }
 
     void handle_udp_client(struct sockaddr_in client_addr, socklen_t client_len) {
-        char buffer[BUFFER_SIZE];
+        std::cout << "Handling UDP client..." << std::endl;
+        
         GraphRequest request;
         
-        // Receive request with reliability
+        // Recevoir la requête avec fiabilité
         if (reliable_udp_receive(&request, sizeof(request), 
                                (struct sockaddr*)&client_addr, &client_len)) {
             
-            GraphResponse response = process_graph_request(request);
-            
-            // Send response with reliability
-            reliable_udp_send(&response, sizeof(response),
-                            (struct sockaddr*)&client_addr, client_len);
-        }
-    }
+            // Recevoir la matrice d'incidence
+            std::vector<std::vector<int>> incidence_matrix(request.num_vertices, 
+                                                         std::vector<int>(request.num_edges));
+            std::vector<double> edge_weights(request.num_edges);
 
-    GraphResponse process_graph_request(const GraphRequest& request) {
-        GraphResponse response;
-        
-        try {
-            // Validate input
-            if (request.num_vertices < 6 || request.num_edges < 6) {
-                response.success = false;
-                response.error_message = "Graph must have at least 6 vertices and 6 edges";
-                return response;
+            for (int i = 0; i < request.num_vertices; i++) {
+                reliable_udp_receive(incidence_matrix[i].data(), request.num_edges * sizeof(int),
+                                   (struct sockaddr*)&client_addr, &client_len);
             }
             
-            if (request.start_vertex < 0 || request.start_vertex >= request.num_vertices ||
-                request.end_vertex < 0 || request.end_vertex >= request.num_vertices) {
-                response.success = false;
-                response.error_message = "Invalid start or end vertex";
-                return response;
-            }
-            
-            // Create graph and compute shortest path
-            Graph graph(request.num_vertices, request.num_edges, 
-                       request.incidence_matrix, request.edge_weights);
-            
+            // Recevoir les poids
+            reliable_udp_receive(edge_weights.data(), request.num_edges * sizeof(double),
+                               (struct sockaddr*)&client_addr, &client_len);
+
+            // Traiter la requête
+            Graph graph(request.num_vertices, request.num_edges, incidence_matrix, edge_weights);
             auto result = graph.dijkstra(request.start_vertex, request.end_vertex);
-            
+
+            // Préparer la réponse
+            GraphResponse response;
             response.path_length = result.first;
-            response.path_vertices = result.second;
+            response.path_size = result.second.size();
             response.success = (result.first != std::numeric_limits<double>::infinity());
             
             if (!response.success) {
-                response.error_message = "No path exists between the specified vertices";
+                strncpy(response.error_message, "No path exists between the specified vertices", 
+                       sizeof(response.error_message));
+            } else {
+                response.error_message[0] = '\0';
             }
+
+            // Envoyer la réponse avec fiabilité
+            reliable_udp_send(&response, sizeof(response),
+                            (struct sockaddr*)&client_addr, client_len);
             
-        } catch (const std::exception& e) {
-            response.success = false;
-            response.error_message = std::string("Error processing graph: ") + e.what();
+            // Envoyer le chemin si existe
+            if (response.success && response.path_size > 0) {
+                reliable_udp_send(result.second.data(), response.path_size * sizeof(int),
+                                (struct sockaddr*)&client_addr, client_len);
+            }
         }
         
-        return response;
+        std::cout << "UDP client handled" << std::endl;
     }
 
     bool reliable_udp_receive(void* buffer, size_t size, struct sockaddr* addr, socklen_t* addr_len) {
@@ -207,7 +252,7 @@ private:
             if (ready > 0) {
                 ssize_t received = recvfrom(server_socket_udp, buffer, size, 0, addr, addr_len);
                 if (received > 0) {
-                    // Send ACK
+                    // Envoyer ACK
                     sendto(server_socket_udp, ack_msg, strlen(ack_msg), 0, addr, *addr_len);
                     return true;
                 }
@@ -248,6 +293,20 @@ private:
         return false;
     }
 
+    static void* tcp_client_handler(void* arg) {
+        ThreadData* data = (ThreadData*)arg;
+        data->server->handle_tcp_client(data->client_socket);
+        delete data;
+        return NULL;
+    }
+
+    static void* udp_client_handler(void* arg) {
+        ThreadData* data = (ThreadData*)arg;
+        data->server->handle_udp_client(data->client_addr, data->client_len);
+        delete data;
+        return NULL;
+    }
+
 public:
     Server(int p) : port(p), running(false), client_count(0) {
         server_socket_tcp = socket(AF_INET, SOCK_STREAM, 0);
@@ -271,12 +330,12 @@ public:
         address.sin_addr.s_addr = INADDR_ANY;
         address.sin_port = htons(port);
         
-        // Bind TCP socket
+        // Liaison socket TCP
         if (bind(server_socket_tcp, (struct sockaddr*)&address, sizeof(address)) < 0) {
             throw std::runtime_error("TCP bind failed");
         }
         
-        // Bind UDP socket
+        // Liaison socket UDP
         if (bind(server_socket_udp, (struct sockaddr*)&address, sizeof(address)) < 0) {
             throw std::runtime_error("UDP bind failed");
         }
@@ -295,7 +354,7 @@ public:
             
             int max_fd = std::max(server_socket_tcp, server_socket_udp);
             
-            struct timeval timeout = {1, 0}; // 1 second timeout
+            struct timeval timeout = {1, 0}; // timeout de 1 seconde
             int activity = select(max_fd + 1, &readfds, NULL, NULL, &timeout);
             
             if (activity < 0 && running) {
@@ -304,7 +363,7 @@ public:
             }
             
             if (FD_ISSET(server_socket_tcp, &readfds)) {
-                // TCP connection
+                // Connexion TCP
                 struct sockaddr_in client_addr;
                 socklen_t client_len = sizeof(client_addr);
                 int client_socket = accept(server_socket_tcp, (struct sockaddr*)&client_addr, &client_len);
@@ -312,22 +371,24 @@ public:
                 if (client_socket >= 0) {
                     std::cout << "New TCP client connected: " << inet_ntoa(client_addr.sin_addr) << std::endl;
                     
-                    // Handle in separate thread
+                    // Gérer dans un thread séparé
+                    ThreadData* data = new ThreadData{this, client_socket, client_addr, client_len};
                     pthread_t thread_id;
-                    int* client_sock_ptr = new int(client_socket);
-                    pthread_create(&thread_id, NULL, &Server::tcp_client_handler, client_sock_ptr);
+                    pthread_create(&thread_id, NULL, &Server::tcp_client_handler, data);
                     pthread_detach(thread_id);
                 }
             }
             
             if (FD_ISSET(server_socket_udp, &readfds)) {
-                // UDP datagram
+                // Datagramme UDP
                 struct sockaddr_in client_addr;
                 socklen_t client_len = sizeof(client_addr);
                 
-                // Handle in separate thread
+                // Créer une structure de données pour le thread
+                ThreadData* data = new ThreadData{this, -1, client_addr, client_len};
+                
+                // Gérer dans un thread séparé
                 pthread_t thread_id;
-                struct udp_client_data* data = new udp_client_data{this, client_addr, client_len};
                 pthread_create(&thread_id, NULL, &Server::udp_client_handler, data);
                 pthread_detach(thread_id);
             }
@@ -336,32 +397,14 @@ public:
 
     void stop() {
         running = false;
-        if (server_socket_tcp >= 0) close(server_socket_tcp);
-        if (server_socket_udp >= 0) close(server_socket_udp);
-    }
-
-private:
-    struct udp_client_data {
-        Server* server;
-        struct sockaddr_in client_addr;
-        socklen_t client_len;
-    };
-
-    static void* tcp_client_handler(void* arg) {
-        int client_socket = *((int*)arg);
-        delete (int*)arg;
-        
-        Server* server = nullptr; // Would need instance reference
-        // server->handle_tcp_client(client_socket);
-        close(client_socket);
-        return NULL;
-    }
-
-    static void* udp_client_handler(void* arg) {
-        udp_client_data* data = (udp_client_data*)arg;
-        data->server->handle_udp_client(data->client_addr, data->client_len);
-        delete data;
-        return NULL;
+        if (server_socket_tcp >= 0) {
+            close(server_socket_tcp);
+            server_socket_tcp = -1;
+        }
+        if (server_socket_udp >= 0) {
+            close(server_socket_udp);
+            server_socket_udp = -1;
+        }
     }
 };
 
@@ -375,6 +418,10 @@ int main(int argc, char* argv[]) {
     
     try {
         Server server(port);
+        
+        // Gérer le signal SIGINT pour arrêter proprement
+        std::cout << "Server running. Press Ctrl+C to stop." << std::endl;
+        
         server.start();
     } catch (const std::exception& e) {
         std::cerr << "Server error: " << e.what() << std::endl;
