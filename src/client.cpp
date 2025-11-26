@@ -1,121 +1,101 @@
 #include <iostream>
-#include <vector>
-#include <string>
-#include <sstream>
-#include <sys/types.h>
 #include <sys/socket.h>
-#include <netdb.h>
+#include <arpa/inet.h>
 #include <unistd.h>
-
+#include <vector>
+#include <cstring>
 #include "protocols.h"
 
 using namespace std;
 
-bool send_line(int sock, const string &s) {
-    string msg = s + "\n";
-    size_t total = 0;
-    while (total < msg.size()) {
-        ssize_t sent = send(sock, msg.data() + total, msg.size() - total, 0);
-        if (sent <= 0) return false;
-        total += sent;
-    }
-    return true;
-}
+int main() {
+    string server_ip;
+    int port;
 
-int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        cerr << "Usage: " << argv[0] << " <IP_serveur> <port>\n";
+    cout << "=== CLIENT - GRAPH MANUAL INPUT MODE ===" << endl;
+
+    // --- CHOIX DE L’IP + PORT ---
+    cout << "Enter server IP (default 127.0.0.1) : ";
+    cin >> server_ip;
+    cout << "Enter server port : ";
+    cin >> port;
+
+    // --- SAISIE DU GRAPHE ---
+    GraphRequest request;    
+    cout << "\nEnter number of vertices: ";
+    cin >> request.vertices;
+    cout << "Enter number of edges: ";
+    cin >> request.edges;
+
+    request.weighted = 1; // ON TRAVAILLE AVEC MATRICE D’INCIDENCE PONDÉRÉE
+
+    // Saisie des sommets de départ/fin
+    cout << "Enter start vertex (0-" << request.vertices-1 << "): ";
+    cin >> request.start_node;
+    cout << "Enter end vertex (0-" << request.vertices-1 << "): ";
+    cin >> request.end_node;
+
+    // --- MATRICE D’INCIDENCE ---
+    vector<int> matrix_data(request.vertices * request.edges, 0);
+    vector<int> edgeWeights(request.edges);
+
+    cout << "\n=== Manual edge entry ===" << endl;
+    cout << "For each edge, enter two vertices connected + its weight." << endl;
+    cout << "Format: u v w  (u and v are vertices, w is weight)" << endl << endl;
+
+    for(int e=0; e<request.edges; e++){
+        int u, v, w;
+        cout << "Edge " << e << " : ";
+        cin >> u >> v >> w;
+
+        // On stocke l’arête dans la matrice d’incidence
+        matrix_data[u * request.edges + e] = +w;  // +w pour un sommet
+        matrix_data[v * request.edges + e] = -w;  // -w pour l’autre
+
+        edgeWeights[e] = w;
+    }
+
+    // --- CREATION SOCKET ---
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if(sock < 0){
+        perror("Socket creation failed");
         return 1;
     }
-    const char* host = argv[1];
-    const char* port = argv[2];
 
-    int n, m;
-    cout << "Entrer n (sommets) et m (arêtes): ";
-    cin >> n >> m;
+    struct sockaddr_in serv_addr{};
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
 
-    vector<vector<int>> A(n, vector<int>(m));
+    inet_pton(AF_INET, server_ip.c_str(), &serv_addr.sin_addr);
 
-    cout << "Entrer la matrice d'incidence pondérée (" << n << " lignes de " << m << " valeurs) :\n";
-    for (int i = 0; i < n; ++i)
-        for (int j = 0; j < m; ++j)
-            cin >> A[i][j];
-
-    int s, t;
-    cout << "Entrer sommet de départ et sommet d'arrivée: ";
-    cin >> s >> t;
-
-    //---------------------------
-    // Résolution DNS
-    //---------------------------
-    struct addrinfo hints{}, *res;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    int err = getaddrinfo(host, port, &hints, &res);
-    if (err) {
-        cerr << "getaddrinfo: " << gai_strerror(err) << endl;
+    cout << "\nConnecting to server..." << endl;
+    if(connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0){
+        perror("Connection failed");
         return 1;
     }
+    cout << "Connected ✓" << endl;
 
-    //---------------------------
-    // Création du socket
-    //---------------------------
-    int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd < 0) { perror("socket"); return 1; }
+    // --- ENVOI AU SERVEUR (header + matrice + poids) ---
+    send(sock, &request, sizeof(request), 0);
+    send(sock, matrix_data.data(), matrix_data.size()*sizeof(int), 0);
+    send(sock, edgeWeights.data(), edgeWeights.size()*sizeof(int), 0);
 
-    //---------------------------
-    // Connexion au serveur
-    //---------------------------
-    if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
-        perror("connect");
-        close(sockfd);
-        return 1;
+    // --- RÉCEPTION RESULTAT ---
+    GraphResponse response;
+    recv(sock, &response, sizeof(response), 0);
+
+    cout << "\n========== SERVER RESPONSE ==========" << endl;
+    cout << "Shortest path length = " << response.path_length << endl;
+    cout << "Path = ";
+
+    for(int i=0 ; i<response.path_size ; i++){
+        cout << response.path[i];
+        if(i < response.path_size-1) cout << " -> ";
     }
-    freeaddrinfo(res);
+    cout << endl;
 
-    //---------------------------
-    // Envoi de n et m
-    //---------------------------
-    {
-        ostringstream oss;
-        oss << n << " " << m;
-        send_line(sockfd, oss.str());
-    }
+    cout << "=====================================\n";
 
-    //---------------------------
-    // Envoi de la matrice
-    //---------------------------
-    for (int i = 0; i < n; ++i) {
-        ostringstream oss;
-        for (int j = 0; j < m; ++j) {
-            if (j) oss << " ";
-            oss << A[i][j];
-        }
-        send_line(sockfd, oss.str());
-    }
-
-    //---------------------------
-    // Envoi de s et t
-    //---------------------------
-    {
-        ostringstream oss;
-        oss << s << " " << t;
-        send_line(sockfd, oss.str());
-    }
-
-    //---------------------------
-    // Réception du résultat
-    //---------------------------
-    char buffer[256];
-    ssize_t bytes = recv(sockfd, buffer, sizeof(buffer)-1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        cout << ">>> Réponse du serveur : " << buffer;
-    } else {
-        cerr << "Erreur: pas de réponse du serveur.\n";
-    }
-
-    close(sockfd);
+    close(sock);
     return 0;
 }
