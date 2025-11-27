@@ -28,9 +28,9 @@ string gen_id() {
 
 int main(){
 
-    cout << "■ Source des données ?\n"
-         << "1 = saisir manuellement\n"
-         << "2 = charger depuis un fichier .txt\n> ";
+    cout << "■ Data source?\n"
+         << "1 = manual input\n"
+         << "2 = load from .txt file\n> ";
 
     int mode; cin >> mode;
 
@@ -38,19 +38,19 @@ int main(){
     vector<int> mat,weights;
 
     if(mode == 2){
-        // ========== LECTURE FICHIER ==========
+        // ========== FILE READING ==========
         string filename;
-        cout << "Nom du fichier : ";
+        cout << "File name: ";
         cin >> filename;
 
         ifstream fin(filename);
-        if(!fin){ cerr<<"Impossible d'ouvrir le fichier\n"; return 1; }
+        if(!fin){ cerr<<"Unable to open file\n"; return 1; }
 
         fin >> n >> m;
         fin >> s >> t;
 
         if(!(n>=6 && n<20 && m>=6 && m<20)){
-            cerr<<"Erreur : n et m hors limites [6..19]\n";
+            cerr<<"Error: n and m out of bounds [6..19]\n";
             return 1;
         }
 
@@ -59,28 +59,28 @@ int main(){
 
         for(int e=0;e<m;e++){
             int u,v,w;
-            if(!(fin>>u>>v>>w)){ cerr<<"Format fichier invalide\n"; return 1; }
+            if(!(fin>>u>>v>>w)){ cerr<<"Invalid file format\n"; return 1; }
 
             mat[u*m + e] = (w>0?w:-w);
             mat[v*m + e] = (w>0?-w:w);
             weights[e] = abs(w);
         }
 
-        cout << "\nLecture fichier OK ✔\n\n";
+        cout << "\nFile reading OK ✔\n\n";
     }
     else {
-        // ========== SAISIE MANUELLE ==========
-        cout<<"Nombre de sommets (6..19): "; cin>>n;
-        cout<<"Nombre d'arêtes (6..19): "; cin>>m;
-        if(!(n>=6 && n<20 && m>=6 && m<20)) { cerr<<"n et m invalides\n"; return 1; }
+        // ========== MANUAL INPUT ==========
+        cout<<"Number of vertices (6..19): "; cin>>n;
+        cout<<"Number of edges (6..19): "; cin>>m;
+        if(!(n>=6 && n<20 && m>=6 && m<20)) { cerr<<"Invalid n and m values\n"; return 1; }
 
-        cout<<"Sommet de départ: "; cin>>s;
-        cout<<"Sommet d'arrivée: "; cin>>t;
+        cout<<"Start vertex: "; cin>>s;
+        cout<<"End vertex: "; cin>>t;
 
         mat.assign(n*m,0);
         weights.assign(m,1);
 
-        cout<<"\nEntrer "<<m<<" arêtes sous forme : u v w\n\n";
+        cout<<"\nEnter "<<m<<" edges in format: u v w\n\n";
         for(int e=0;e<m;e++){
             int u,v,w;
             cout<<"Edge "<<e<<" : ";
@@ -93,14 +93,14 @@ int main(){
     }
 
     //===========================
-    //🔹 Connexion au SERVEUR
+    //🔹 Connect to SERVER
     //===========================
-    cout<<"\nProtocole à utiliser ? 1=TCP  2=UDP : ";
+    cout<<"\nProtocol to use? 1=TCP  2=UDP : ";
     int proto; cin>>proto;
 
     string server_ip; int port;
-    cout<<"IP serveur : "; cin>>server_ip;
-    cout<<"Port : "; cin>>port;
+    cout<<"Server IP: "; cin>>server_ip;
+    cout<<"Port: "; cin>>port;
 
 
     //============================================ TCP MODE ===========================================
@@ -167,7 +167,7 @@ int main(){
             for(int i=0;i<sz;i++){
                 cout<<p[4+i]<<(i+1<sz?"->":"");
             } cout<<"\n";
-        } else cout<<"Erreur serveur : "<<buf<<"\n";
+        } else cout<<"Server error: "<<buf<<"\n";
 
         close(sock);
     }
