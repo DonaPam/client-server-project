@@ -156,3 +156,5 @@ int main(int argc, char** argv) {
     }
 
     cout << "Client exiting...\n";
+    return 0;
+}
