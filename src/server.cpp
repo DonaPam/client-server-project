@@ -81,7 +81,7 @@ vector<vector<pair<int,int>>> build_adj(int n,int m,vector<int>&mat,vector<int>&
 // --------------------- TCP CLIENT HANDLER ---------------
 // --------------------------------------------------------
 void handle_tcp(int client){
-    cout<<"[TCP] Client connecté.\n";
+    cout<<"[TCP] Client connected.\n";
 
     GraphRequest req;
     if(recv(client,&req,sizeof(req),MSG_WAITALL)!=sizeof(req)){ close(client);return;}
@@ -89,7 +89,7 @@ void handle_tcp(int client){
     GraphResponse resp{}; resp.error_code=1; resp.path_length=-1;
 
     if(!valid_nm(req.vertices,req.edges)){
-        strcpy(resp.message,"n et m doivent etre >=6 et <20");
+        strcpy(resp.message,"n and m should bebetween >=6 and <20");
         send(client,&resp,sizeof(resp),0);
         close(client);return;
     }
@@ -106,7 +106,7 @@ void handle_tcp(int client){
     auto R=dijkstra(n,adj,req.start_node,req.end_node);
 
     if(!R.ok){
-        strcpy(resp.message,"Aucun chemin");
+        strcpy(resp.message,"No path found");
         resp.path_size=0; resp.path_length=-1;
     }else{
         resp.error_code=0;
@@ -190,7 +190,7 @@ void udp_process(string cid,int udp){
     auto R=dijkstra(n,adj,S,T);
 
     if(!R.ok){
-        string o="SERVER_RESPONSE ERROR Aucun chemin";
+        string o="SERVER_RESPONSE ERROR No Path";
         sendto(udp,o.c_str(),o.size(),0,(sockaddr*)&buf.addr,sizeof(buf.addr));
         return;
     }
@@ -215,7 +215,7 @@ int main(int argc,char**argv){
 
     bind(udp,(sockaddr*)&a,sizeof(a));
 
-    cout<<"SERVER active sur port "<<PORT<<" (TCP+UDP)\n";
+    cout<<"SERVER active on port "<<PORT<<" (TCP+UDP)\n";
 
     thread([&]{
         while(true){
@@ -232,7 +232,7 @@ int main(int argc,char**argv){
         int r=recvfrom(udp,buf,2047,0,(sockaddr*)&c,&L);
         if(r<=0)continue;
         buf[r]='\0';
-        cout<<"[UDP] Paquet reçu de "<<inet_ntoa(c.sin_addr)<<":"<<ntohs(c.sin_port)<<"\n";
+        cout<<"[UDP] Paquet received from "<<inet_ntoa(c.sin_addr)<<":"<<ntohs(c.sin_port)<<"\n";
         auto p=split_ws(buf);
         string cid=p[0];
 
