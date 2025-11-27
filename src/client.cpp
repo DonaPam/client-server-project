@@ -1,6 +1,3 @@
-// client.cpp
-// Compile: g++ client.cpp -o client -std=c++17
-
 #include <bits/stdc++.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -22,155 +19,124 @@ string gen_id() {
     static mt19937_64 rng((unsigned)chrono::high_resolution_clock::now().time_since_epoch().count());
     uint64_t v = rng();
     string s;
-    for (int i=0;i<8;i++){ s.push_back("0123456789ABCDEF"[v&15]); v >>=4; }
+    for (int i = 0; i < 8; i++) { s.push_back("0123456789ABCDEF"[v & 15]); v >>= 4; }
     return s;
 }
 
-int main(){
-
-    cout << "■ How do you want to enter the graph ?\n"
-         << "1 = Manual\n"
-         << "2 = From file .txt\n> ";
-
-    int mode; cin >> mode;
-
-    int n,m,s,t;
-    vector<int> mat,weights;
-
-    if(mode == 2){
-        // ========== LECTURE FICHIER ==========
-        string filename;
-        cout << "Filename : ";
-        cin >> filename;
-
-        ifstream fin(filename);
-        if(!fin){ cerr<<"Impossible to open the file\n"; return 1; }
-
-        fin >> n >> m;
-        fin >> s >> t;
-
-        if(!(n>=6 && n<=20 && m>=6 && m<=20)){
-            cerr<<"Error : n and m are more than the limit [6..20]\n";
-            return 1;
-        }
-
-        mat.assign(n*m,0);
-        weights.assign(m,1);
-
-        for(int e=0;e<m;e++){
-            int u,v,w;
-            if(!(fin>>u>>v>>w)){ cerr<<"Format file invalid\n"; return 1; }
-
-            mat[u*m + e] = (w>0?w:-w);
-            mat[v*m + e] = (w>0?-w:w);
-            weights[e] = abs(w);
-        }
-
-        cout << "\nRead file OK ✔\n\n";
-    }
-    else {
-        // ========== SAISIE MANUELLE ==========
-        cout<<"Number of vertices (6..20): "; cin>>n;
-        cout<<"Number of edges (6..20): "; cin>>m;
-        if(!(n>=6 && n<=20 && m>=6 && m<=20)) { cerr<<"n and m invalids\n"; return 1; }
-
-        cout<<"Start vertex: "; cin>>s;
-        cout<<"End vertex: "; cin>>t;
-
-        mat.assign(n*m,0);
-        weights.assign(m,1);
-
-        cout<<"\nEnter "<<m<<" each edges as: u v w\n\n";
-        for(int e=0;e<m;e++){
-            int u,v,w;
-            cout<<"Edge "<<e<<" : ";
-            cin>>u>>v>>w;
-
-            mat[u*m+e] = (w>0?w:-w);
-            mat[v*m+e] = (w>0?-w:w);
-            weights[e] = abs(w);
-        }
+int main(int argc, char** argv) {
+    if(argc != 4){
+        cerr << "Usage: ./calc_client <IP> <TCP|UDP> <PORT>\n";
+        return 1;
     }
 
-    //===========================
-    //🔹 Connexion au SERVEUR
-    //===========================
-    cout<<"\nProtocol to use ? 1=TCP  2=UDP : ";
-    int proto; cin>>proto;
+    string server_ip = argv[1];
+    string proto_str = argv[2];
+    int port = stoi(argv[3]);
+    bool use_tcp = (proto_str == "TCP" || proto_str == "tcp");
 
-    string server_ip; int port;
-    cout<<"IP server : "; cin>>server_ip;
-    cout<<"Port : "; cin>>port;
+    cout << "Client ready. Type 'exit' to quit.\n";
 
+    while(true){
+        string line;
+        cout << "\nDo you want to enter the graph manually or from file? (manual/file) > ";
+        cin >> line;
+        if(line == "exit") break;
 
-    //============================================ TCP MODE ===========================================
-    if(proto==1){
-        int sock=socket(AF_INET,SOCK_STREAM,0);
-        if(sock<0){ perror("socket"); return 1; }
+        int n, m, s, t;
+        vector<int> mat, weights;
 
-        sockaddr_in srv{};
-        srv.sin_family=AF_INET;
-        srv.sin_port=htons(port);
-        inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
+        if(line == "file"){
+            string filename;
+            cout << "Filename: ";
+            cin >> filename;
+            ifstream fin(filename);
+            if(!fin){ cerr << "Cannot open file\n"; continue; }
 
-        if(connect(sock,(sockaddr*)&srv,sizeof(srv))<0){ perror("connect"); return 1; }
+            fin >> n >> m >> s >> t;
+            if(!(n>=6 && n<=20 && m>=6 && m<=20)){ cerr << "n and m out of range\n"; continue; }
 
-        GraphRequest req{n,m,s,t,1};
-        send(sock,&req,sizeof(req),0);
-        send(sock,mat.data(),mat.size()*sizeof(int),0);
-        send(sock,weights.data(),weights.size()*sizeof(int),0);
-
-        GraphResponse R;
-        if(recv(sock,&R,sizeof(R),MSG_WAITALL)==sizeof(R)){
-            cout<<"\n=== RESULT (TCP) ===\nPath length: "<<R.path_length<<"\nPath: ";
-            for(int i=0;i<R.path_size;i++){
-                cout<<R.path[i]<<(i+1<R.path_size?"->":"");
+            mat.assign(n*m,0); weights.assign(m,1);
+            for(int e=0;e<m;e++){
+                int u,v,w; fin>>u>>v>>w;
+                mat[u*m+e] = (w>0?w:-w);
+                mat[v*m+e] = (w>0?-w:w);
+                weights[e] = abs(w);
             }
-            cout<<"\n";
-        }
-        close(sock);
-    }
-    //============================================ UDP MODE ===========================================
-    else {
-        int sock=socket(AF_INET,SOCK_DGRAM,0);
-        sockaddr_in srv{}; srv.sin_family=AF_INET;
-        srv.sin_port=htons(port);
-        inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
+            cout << "File read OK ✔\n";
+        } else {
+            cout << "Number of vertices (6..20): "; cin >> n;
+            cout << "Number of edges (6..20): "; cin >> m;
+            if(!(n>=6 && n<=20 && m>=6 && m<=20)){ cerr << "Invalid n or m\n"; continue; }
 
-        string cid=gen_id();
+            cout << "Start vertex: "; cin >> s;
+            cout << "End vertex: "; cin >> t;
 
-        string H=cid+" HEADER "+to_string(n)+" "+to_string(m)+" "+to_string(s)+" "+to_string(t);
-        sendto(sock,H.c_str(),H.size(),0,(sockaddr*)&srv,sizeof(srv));
-
-        for(int i=0;i<n;i++){
-            string row=cid+" ROW";
-            for(int e=0;e<m;e++) row+=" "+to_string(mat[i*m+e]);
-            sendto(sock,row.c_str(),row.size(),0,(sockaddr*)&srv,sizeof(srv));
+            mat.assign(n*m,0); weights.assign(m,1);
+            for(int e=0;e<m;e++){
+                int u,v,w; cout << "Edge " << e << ": "; cin >> u >> v >> w;
+                mat[u*m+e] = (w>0?w:-w);
+                mat[v*m+e] = (w>0?-w:w);
+                weights[e] = abs(w);
+            }
         }
 
-        string W=cid+" WEIGHTS";
-        for(int x:weights) W+=" "+to_string(x);
-        sendto(sock,W.c_str(),W.size(),0,(sockaddr*)&srv,sizeof(srv));
+        if(use_tcp){
+            int sock=socket(AF_INET,SOCK_STREAM,0);
+            if(sock<0){ perror("socket"); continue; }
 
-        string FIN=cid+" FIN";
-        sendto(sock,FIN.c_str(),FIN.size(),0,(sockaddr*)&srv,sizeof(srv));
+            sockaddr_in srv{}; srv.sin_family=AF_INET; srv.sin_port=htons(port);
+            inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
+            if(connect(sock,(sockaddr*)&srv,sizeof(srv))<0){ perror("connect"); close(sock); continue; }
 
-        char buf[4096];
-        sockaddr_in from; socklen_t L=sizeof(from);
-        int r=recvfrom(sock,buf,4095,0,(sockaddr*)&from,&L);
-        buf[r]='\0';
+            GraphRequest req{n,m,s,t,1};
+            send(sock,&req,sizeof(req),0);
+            send(sock,mat.data(),mat.size()*sizeof(int),0);
+            send(sock,weights.data(),weights.size()*sizeof(int),0);
 
-        auto p=split_ws(buf);
-        if(p.size()>=4 && p[1]=="OK"){
-            cout<<"\n=== RESULT (UDP) ===\nPath length: "<<p[2]<<"\nPath: ";
-            int sz=stoi(p[3]);
-            for(int i=0;i<sz;i++){
-                cout<<p[4+i]<<(i+1<sz?"->":"");
-            } cout<<"\n";
-        } else cout<<"Error server : "<<buf<<"\n";
+            GraphResponse R;
+            if(recv(sock,&R,sizeof(R),MSG_WAITALL)==sizeof(R)){
+                cout<<"\n=== RESULT (TCP) ===\nPath length: "<<R.path_length<<"\nPath: ";
+                for(int i=0;i<R.path_size;i++) cout<<R.path[i]<<(i+1<R.path_size?"->":"");
+                cout<<"\n";
+            }
+            close(sock);
+        } else {
+            int sock=socket(AF_INET,SOCK_DGRAM,0);
+            sockaddr_in srv{}; srv.sin_family=AF_INET; srv.sin_port=htons(port);
+            inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
 
-        close(sock);
+            string cid=gen_id();
+            string H=cid+" HEADER "+to_string(n)+" "+to_string(m)+" "+to_string(s)+" "+to_string(t);
+            sendto(sock,H.c_str(),H.size(),0,(sockaddr*)&srv,sizeof(srv));
+
+            for(int i=0;i<n;i++){
+                string row=cid+" ROW";
+                for(int e=0;e<m;e++) row+=" "+to_string(mat[i*m+e]);
+                sendto(sock,row.c_str(),row.size(),0,(sockaddr*)&srv,sizeof(srv));
+            }
+
+            string W=cid+" WEIGHTS";
+            for(int x:weights) W+=" "+to_string(x);
+            sendto(sock,W.c_str(),W.size(),0,(sockaddr*)&srv,sizeof(srv));
+
+            string FIN=cid+" FIN";
+            sendto(sock,FIN.c_str(),FIN.size(),0,(sockaddr*)&srv,sizeof(srv));
+
+            char buf[4096]; sockaddr_in from; socklen_t L=sizeof(from);
+            int r=recvfrom(sock,buf,4095,0,(sockaddr*)&from,&L); buf[r]='\0';
+
+            auto p=split_ws(buf);
+            if(p.size()>=4 && p[1]=="OK"){
+                cout<<"\n=== RESULT (UDP) ===\nPath length: "<<p[2]<<"\nPath: ";
+                int sz=stoi(p[3]);
+                for(int i=0;i<sz;i++) cout<<p[4+i]<<(i+1<sz?"->":"");
+                cout<<"\n";
+            } else cout<<"Server error: "<<buf<<"\n";
+
+            close(sock);
+        }
     }
 
+    cout << "Client exiting...\n";
     return 0;
 }
