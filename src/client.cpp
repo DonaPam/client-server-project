@@ -99,7 +99,24 @@ int main(){
         ssize_t nr = recvfrom(sock, buf, sizeof(buf)-1, 0, (sockaddr*)&from, &fl);
         if (nr <= 0) { cerr<<"No response\n"; close(sock); return 1; }
         buf[nr] = '\0'; string resp(buf);
-        cout<<"Server replied: "<<resp<<"\n";
+
+       // ======== FORMAT HUMAN-READABLE COMME TCP =========
+auto p = split_ws(resp);
+if (p.size() >= 4 && p[0] == "SERVER_RESPONSE" && p[1] == "OK") {
+    int length = stoi(p[2]);
+    int path_size = stoi(p[3]);
+    cout << "\n=== RESULT (UDP) ===\n";
+    cout << "Path length: " << length << "\n";
+    cout << "Path: ";
+    for (int i = 0; i < path_size; i++) {
+        cout << p[4+i];
+        if (i < path_size - 1) cout << "->";
+    }
+    cout << "\n";
+} else {
+    cout << "\nError from server: " << resp << "\n";
+}
+
         close(sock);
     }
 
