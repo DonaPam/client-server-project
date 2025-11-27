@@ -33,9 +33,9 @@ int main(){
     cout<<"Server IP: "; cin>>server_ip;
     cout<<"Server port: "; cin>>port;
 
-    int n,m; cout<<"Number of vertices (7..19): "; cin>>n;
-    cout<<"Number of edges (7..19): "; cin>>m;
-    if (!(n>6 && n<20 && m>6 && m<20)) { cerr<<"n and m must be >6 and <20\n"; return 1; }
+    int n,m; cout<<"Number of vertices (6<): "; cin>>n;
+    cout<<"Number of edges (6<): "; cin>>m;
+    if (!(n>5 && n<20 && m>5 && m<20)) { cerr<<"n and m must be >6 and <20\n"; return 1; }
     int s,t; cout<<"Start vertex (0.."<<n-1<<"): "; cin>>s; cout<<"End vertex: "; cin>>t;
 
     vector<int> mat(n*m,0);
