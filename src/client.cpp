@@ -1,334 +1,107 @@
-#include <iostream>
-#include <vector>
-#include <cstring>
+// client.cpp
+// Compile: g++ client.cpp -o client -std=c++17
+
+#include <bits/stdc++.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <sstream>
-#include <fstream>
+#include "protocol.h"
+using namespace std;
 
-#define BUFFER_SIZE 1024
-#define TIMEOUT_SEC 3
-#define MAX_RETRIES 3
+static vector<string> split_ws(const string &s) {
+    vector<string> out; string t;
+    for (char c : s) {
+        if (isspace((unsigned char)c)) { if (!t.empty()) { out.push_back(t); t.clear(); } }
+        else t.push_back(c);
+    }
+    if (!t.empty()) out.push_back(t);
+    return out;
+}
 
-struct GraphRequest {
-    int num_vertices;
-    int num_edges;
-    int start_vertex;
-    int end_vertex;
-};
+string gen_id() {
+    static mt19937_64 rng((unsigned)chrono::high_resolution_clock::now().time_since_epoch().count());
+    uint64_t v = rng();
+    string s;
+    for (int i=0;i<8;i++){ s.push_back("0123456789ABCDEF"[v&15]); v >>=4; }
+    return s;
+}
 
-struct GraphResponse {
-    double path_length;
-    int path_size;
-    bool success;
-    char error_message[256];
-};
+int main(){
+    cout<<"Protocol to use? (1=TCP, 2=UDP): ";
+    int proto; cin>>proto;
+    string server_ip; int port;
+    cout<<"Server IP: "; cin>>server_ip;
+    cout<<"Server port: "; cin>>port;
 
-class Client {
-private:
-    std::string server_ip;
-    int server_port;
-    std::string protocol;
+    int n,m; cout<<"Number of vertices (7..19): "; cin>>n;
+    cout<<"Number of edges (7..19): "; cin>>m;
+    if (!(n>6 && n<20 && m>6 && m<20)) { cerr<<"n and m must be >6 and <20\n"; return 1; }
+    int s,t; cout<<"Start vertex (0.."<<n-1<<"): "; cin>>s; cout<<"End vertex: "; cin>>t;
 
-    GraphRequest get_graph_from_user() {
-        GraphRequest request;
-        std::string input_method;
-        
-        std::cout << "Choose input method (keyboard/file): ";
-        std::cin >> input_method;
-        
-        if (input_method == "file") {
-            return read_graph_from_file();
-        } else {
-            return read_graph_from_keyboard();
-        }
+    vector<int> mat(n*m,0);
+    vector<int> weights(m,1);
+    cout<<"Enter each edge as: u v w  (0-based u,v)\n";
+    for (int e=0;e<m;e++){
+        int u,v,w; cout<<"Edge "<<e<<": "; cin>>u>>v>>w;
+        if (u<0||u>=n||v<0||v>=n){ cerr<<"Invalid vertices\n"; return 1;}
+        mat[u*m + e] = (w>0? w : -w);
+        mat[v*m + e] = (w>0? -w : w);
+        weights[e] = abs(w);
     }
 
-    GraphRequest read_graph_from_keyboard() {
-        GraphRequest request;
-        
-        std::cout << "Enter number of vertices (>=6): ";
-        std::cin >> request.num_vertices;
-        
-        std::cout << "Enter number of edges (>=6): ";
-        std::cin >> request.num_edges;
-        
-        std::cout << "Enter start vertex: ";
-        std::cin >> request.start_vertex;
-        
-        std::cout << "Enter end vertex: ";
-        std::cin >> request.end_vertex;
-        
-        return request;
-    }
-
-    GraphRequest read_graph_from_file() {
-        GraphRequest request;
-        std::string filename;
-        
-        std::cout << "Enter filename: ";
-        std::cin >> filename;
-        
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open file: " + filename);
-        }
-        
-        file >> request.num_vertices >> request.num_edges;
-        file >> request.start_vertex >> request.end_vertex;
-        
-        file.close();
-        return request;
-    }
-
-    std::pair<std::vector<std::vector<int>>, std::vector<double>> get_matrix_from_user(const GraphRequest& request) {
-        std::vector<std::vector<int>> incidence_matrix(request.num_vertices, 
-                                                     std::vector<int>(request.num_edges));
-        std::vector<double> edge_weights(request.num_edges);
-        
-        std::cout << "Enter incidence matrix (one row per vertex):" << std::endl;
-        for (int i = 0; i < request.num_vertices; i++) {
-            std::cout << "Vertex " << i << ": ";
-            for (int j = 0; j < request.num_edges; j++) {
-                std::cin >> incidence_matrix[i][j];
-            }
-        }
-        
-        std::cout << "Enter edge weights: ";
-        for (int j = 0; j < request.num_edges; j++) {
-            std::cin >> edge_weights[j];
-        }
-        
-        return {incidence_matrix, edge_weights};
-    }
-
-    bool reliable_udp_send(int sock, const void* data, size_t size, 
-                          struct sockaddr* addr, socklen_t addr_len) {
-        char ack_buffer[10];
-        int retries = 0;
-        
-        while (retries < MAX_RETRIES) {
-            sendto(sock, data, size, 0, addr, addr_len);
-            
-            fd_set readfds;
-            struct timeval timeout;
-            
-            FD_ZERO(&readfds);
-            FD_SET(sock, &readfds);
-            timeout.tv_sec = TIMEOUT_SEC;
-            timeout.tv_usec = 0;
-            
-            int ready = select(sock + 1, &readfds, NULL, NULL, &timeout);
-            
-            if (ready > 0) {
-                ssize_t received = recvfrom(sock, ack_buffer, sizeof(ack_buffer), 0, NULL, NULL);
-                if (received > 0 && strncmp(ack_buffer, "ACK", 3) == 0) {
-                    return true;
-                }
-            }
-            retries++;
-        }
-        
-        std::cout << "Lost connection with server" << std::endl;
-        return false;
-    }
-
-    bool reliable_udp_receive(int sock, void* buffer, size_t size, 
-                             struct sockaddr* addr, socklen_t* addr_len) {
-        char ack_msg[] = "ACK";
-        int retries = 0;
-        
-        while (retries < MAX_RETRIES) {
-            fd_set readfds;
-            struct timeval timeout;
-            
-            FD_ZERO(&readfds);
-            FD_SET(sock, &readfds);
-            timeout.tv_sec = TIMEOUT_SEC;
-            timeout.tv_usec = 0;
-            
-            int ready = select(sock + 1, &readfds, NULL, NULL, &timeout);
-            
-            if (ready > 0) {
-                ssize_t received = recvfrom(sock, buffer, size, 0, addr, addr_len);
-                if (received > 0) {
-                    // Envoyer ACK
-                    sendto(sock, ack_msg, strlen(ack_msg), 0, addr, *addr_len);
-                    return true;
-                }
-            }
-            retries++;
-        }
-        
-        return false;
-    }
-
-public:
-    Client(const std::string& ip, int port, const std::string& proto) 
-        : server_ip(ip), server_port(port), protocol(proto) {}
-
-    void run() {
-        while (true) {
-            std::string command;
-            std::cout << "\nEnter command (or 'exit' to quit): ";
-            std::cin >> command;
-            
-            if (command == "exit") {
-                break;
-            }
-            
-            try {
-                GraphRequest request = get_graph_from_user();
-                auto [incidence_matrix, edge_weights] = get_matrix_from_user(request);
-                
-                GraphResponse response;
-                
-                if (protocol == "tcp") {
-                    response = send_tcp_request(request, incidence_matrix, edge_weights);
-                } else if (protocol == "udp") {
-                    response = send_udp_request(request, incidence_matrix, edge_weights);
-                } else {
-                    std::cout << "Unknown protocol: " << protocol << std::endl;
-                    continue;
-                }
-                
-                display_response(response);
-                
-            } catch (const std::exception& e) {
-                std::cout << "Error: " << e.what() << std::endl;
-            }
-        }
-    }
-
-    GraphResponse send_tcp_request(const GraphRequest& request, 
-                                 const std::vector<std::vector<int>>& incidence_matrix,
-                                 const std::vector<double>& edge_weights) {
+    if (proto == 1) {
+        // TCP: binary send GraphRequest + matrix + weights, receive GraphResponse
         int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-            throw std::runtime_error("TCP socket creation failed");
-        }
-        
-        struct sockaddr_in server_addr;
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
-        inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr);
-        
-        if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-            close(sock);
-            throw std::runtime_error("TCP connection failed");
-        }
-        
-        // Envoyer la requête de base
-        send(sock, &request, sizeof(request), 0);
-        
-        // Envoyer la matrice d'incidence
-        for (int i = 0; i < request.num_vertices; i++) {
-            send(sock, incidence_matrix[i].data(), request.num_edges * sizeof(int), 0);
-        }
-        
-        // Envoyer les poids
-        send(sock, edge_weights.data(), request.num_edges * sizeof(double), 0);
-        
-        // Recevoir la réponse
-        GraphResponse response;
-        recv(sock, &response, sizeof(response), 0);
-        
-        // Recevoir le chemin si existe
-        std::vector<int> path;
-        if (response.success && response.path_size > 0) {
-            path.resize(response.path_size);
-            recv(sock, path.data(), response.path_size * sizeof(int), 0);
-            response.path_size = path.size(); // Pour l'affichage
-        }
-        
+        if (sock < 0) { perror("socket"); return 1; }
+        sockaddr_in srv{}; srv.sin_family = AF_INET; srv.sin_port = htons(port);
+        if (inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr) <= 0) { cerr<<"Bad IP\n"; return 1; }
+        if (connect(sock, (sockaddr*)&srv, sizeof(srv)) < 0) { perror("connect"); return 1; }
+        GraphRequest req{}; req.vertices = n; req.edges = m; req.start_node = s; req.end_node = t; req.weighted = 1;
+        send(sock, &req, sizeof(req), 0);
+        send(sock, mat.data(), mat.size()*sizeof(int), 0);
+        send(sock, weights.data(), weights.size()*sizeof(int), 0);
+        GraphResponse resp; ssize_t r = recv(sock, &resp, sizeof(resp), MSG_WAITALL);
+        if (r == sizeof(resp)) {
+            if (resp.error_code == 0) {
+                cout<<"Path length: "<<resp.path_length<<"\nPath: ";
+                for (int i=0;i<resp.path_size;i++){ cout<<resp.path[i]; if(i+1<resp.path_size) cout<<" -> "; }
+                cout<<"\n";
+            } else cout<<"Error from server: "<<resp.message<<"\n";
+        } else cerr<<"Bad response\n";
         close(sock);
-        
-        // Stocker le chemin pour l'affichage
-        // Note: Dans une vraie implémentation, vous voudriez stocker cela dans la réponse
-        std::cout << "Path vertices: ";
-        for (int vertex : path) {
-            std::cout << vertex << " ";
-        }
-        std::cout << std::endl;
-        
-        return response;
-    }
-
-    GraphResponse send_udp_request(const GraphRequest& request,
-                                 const std::vector<std::vector<int>>& incidence_matrix,
-                                 const std::vector<double>& edge_weights) {
+    } else {
+        // UDP: send text messages as in server expectations
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock < 0) {
-            throw std::runtime_error("UDP socket creation failed");
+        if (sock < 0) { perror("socket"); return 1; }
+        sockaddr_in srv{}; srv.sin_family = AF_INET; srv.sin_port = htons(port);
+        if (inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr) <= 0) { cerr<<"Bad IP\n"; return 1; }
+
+        string cid = gen_id();
+        // HEADER: cid HEADER n m s t
+        string header = cid + " HEADER " + to_string(n) + " " + to_string(m) + " " + to_string(s) + " " + to_string(t);
+        sendto(sock, header.c_str(), header.size(), 0, (sockaddr*)&srv, sizeof(srv));
+        // ROWS: cid ROW <m values> per row
+        for (int i=0;i<n;i++){
+            string row = cid + " ROW";
+            for (int e=0;e<m;e++) row += " " + to_string(mat[i*m + e]);
+            sendto(sock, row.c_str(), row.size(), 0, (sockaddr*)&srv, sizeof(srv));
         }
-        
-        struct sockaddr_in server_addr;
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
-        inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr);
-        
-        GraphResponse response;
-        socklen_t server_len = sizeof(server_addr);
-        
-        // Envoyer la requête avec fiabilité
-        if (reliable_udp_send(sock, &request, sizeof(request), 
-                            (struct sockaddr*)&server_addr, server_len)) {
-            
-            // Envoyer la matrice d'incidence
-            for (int i = 0; i < request.num_vertices; i++) {
-                reliable_udp_send(sock, incidence_matrix[i].data(), request.num_edges * sizeof(int),
-                                (struct sockaddr*)&server_addr, server_len);
-            }
-            
-            // Envoyer les poids
-            reliable_udp_send(sock, edge_weights.data(), request.num_edges * sizeof(double),
-                            (struct sockaddr*)&server_addr, server_len);
-            
-            // Recevoir la réponse avec fiabilité
-            reliable_udp_receive(sock, &response, sizeof(response),
-                               (struct sockaddr*)&server_addr, &server_len);
-        }
-        
+        // WEIGHTS
+        string line = cid + " WEIGHTS";
+        for (int e=0;e<m;e++) line += " " + to_string(weights[e]);
+        sendto(sock, line.c_str(), line.size(), 0, (sockaddr*)&srv, sizeof(srv));
+        // FIN
+        string fin = cid + " FIN bye";
+        sendto(sock, fin.c_str(), fin.size(), 0, (sockaddr*)&srv, sizeof(srv));
+
+        // wait for response
+        char buf[8192]; sockaddr_in from; socklen_t fl = sizeof(from);
+        ssize_t nr = recvfrom(sock, buf, sizeof(buf)-1, 0, (sockaddr*)&from, &fl);
+        if (nr <= 0) { cerr<<"No response\n"; close(sock); return 1; }
+        buf[nr] = '\0'; string resp(buf);
+        cout<<"Server replied: "<<resp<<"\n";
         close(sock);
-        return response;
     }
 
-    void display_response(const GraphResponse& response) {
-        std::cout << "\n=== RESULT ===" << std::endl;
-        if (response.success) {
-            std::cout << "Shortest path length: " << response.path_length << std::endl;
-        } else {
-            std::cout << "Error: " << response.error_message << std::endl;
-        }
-        std::cout << "===============" << std::endl;
-    }
-};
-
-int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cout << "Usage: " << argv[0] << " <server_ip> <port> <protocol(tcp/udp)>" << std::endl;
-        std::cout << "Example: " << argv[0] << " 127.0.0.1 8080 tcp" << std::endl;
-        return 1;
-    }
-    
-    std::string server_ip = argv[1];
-    int port = std::stoi(argv[2]);
-    std::string protocol = argv[3];
-    
-    if (protocol != "tcp" && protocol != "udp") {
-        std::cout << "Protocol must be 'tcp' or 'udp'" << std::endl;
-        return 1;
-    }
-    
-    try {
-        Client client(server_ip, port, protocol);
-        client.run();
-    } catch (const std::exception& e) {
-        std::cerr << "Client error: " << e.what() << std::endl;
-        return 1;
-    }
-    
     return 0;
 }
