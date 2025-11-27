@@ -23,9 +23,21 @@ string gen_id() {
     return s;
 }
 
+// --- Sérialisation explicite des structures ---
+void send_int(int sock, int x) {
+    int32_t tmp = htonl(x);
+    send(sock, &tmp, sizeof(tmp), 0);
+}
+
+int recv_int(int sock) {
+    int32_t tmp;
+    recv(sock, &tmp, sizeof(tmp), MSG_WAITALL);
+    return ntohl(tmp);
+}
+
 int main(int argc, char** argv) {
     if(argc != 4){
-        cerr << "Usage: ./calc_client <IP> <TCP|UDP> <PORT>\n";
+        cerr << "Usage: ./client <IP> <TCP|UDP> <PORT>\n";
         return 1;
     }
 
@@ -38,7 +50,7 @@ int main(int argc, char** argv) {
 
     while(true){
         string line;
-        cout << "\nDo you want to enter the graph manually or from file? (manual/file) > ";
+        cout << "\nEnter graph manually or from file? (manual/file) > ";
         cin >> line;
         if(line == "exit") break;
 
@@ -46,12 +58,9 @@ int main(int argc, char** argv) {
         vector<int> mat, weights;
 
         if(line == "file"){
-            string filename;
-            cout << "Filename: ";
-            cin >> filename;
+            string filename; cout << "Filename: "; cin >> filename;
             ifstream fin(filename);
             if(!fin){ cerr << "Cannot open file\n"; continue; }
-
             fin >> n >> m >> s >> t;
             if(!(n>=6 && n<=20 && m>=6 && m<=20)){ cerr << "n and m out of range\n"; continue; }
 
@@ -62,7 +71,6 @@ int main(int argc, char** argv) {
                 mat[v*m+e] = (w>0?-w:w);
                 weights[e] = abs(w);
             }
-            cout << "File read OK ✔\n";
         } else {
             cout << "Number of vertices (6..20): "; cin >> n;
             cout << "Number of edges (6..20): "; cin >> m;
@@ -81,62 +89,70 @@ int main(int argc, char** argv) {
         }
 
         if(use_tcp){
-            int sock=socket(AF_INET,SOCK_STREAM,0);
-            if(sock<0){ perror("socket"); continue; }
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if(sock < 0){ perror("socket"); continue; }
 
-            sockaddr_in srv{}; srv.sin_family=AF_INET; srv.sin_port=htons(port);
-            inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
-            if(connect(sock,(sockaddr*)&srv,sizeof(srv))<0){ perror("connect"); close(sock); continue; }
+            sockaddr_in srv{}; srv.sin_family = AF_INET; srv.sin_port = htons(port);
+            inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr);
+            if(connect(sock, (sockaddr*)&srv, sizeof(srv)) < 0){ perror("connect"); close(sock); continue; }
 
-            GraphRequest req{n,m,s,t,1};
-            send(sock,&req,sizeof(req),0);
-            send(sock,mat.data(),mat.size()*sizeof(int),0);
-            send(sock,weights.data(),weights.size()*sizeof(int),0);
+            // Envoi sérialisé
+            send_int(sock, n);
+            send_int(sock, m);
+            send_int(sock, s);
+            send_int(sock, t);
 
-            GraphResponse R;
-            if(recv(sock,&R,sizeof(R),MSG_WAITALL)==sizeof(R)){
-                cout<<"\n=== RESULT (TCP) ===\nPath length: "<<R.path_length<<"\nPath: ";
-                for(int i=0;i<R.path_size;i++) cout<<R.path[i]<<(i+1<R.path_size?"->":"");
-                cout<<"\n";
-            }
+            for(int x : mat) send_int(sock, x);
+            for(int x : weights) send_int(sock, x);
+
+            // Réception sérialisée
+            int path_length = recv_int(sock);
+            int path_size = recv_int(sock);
+            vector<int> path(path_size);
+            for(int i=0;i<path_size;i++) path[i] = recv_int(sock);
+
+            cout << "\n=== RESULT (TCP) ===\nPath length: " << path_length << "\nPath: ";
+            for(int i=0;i<path_size;i++) cout << path[i] << (i+1<path_size?"->":"");
+            cout << "\n";
+
             close(sock);
         } else {
-            int sock=socket(AF_INET,SOCK_DGRAM,0);
-            sockaddr_in srv{}; srv.sin_family=AF_INET; srv.sin_port=htons(port);
-            inet_pton(AF_INET,server_ip.c_str(),&srv.sin_addr);
+            // UDP (reste identique à ton code précédent)
+            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in srv{}; srv.sin_family = AF_INET; srv.sin_port = htons(port);
+            inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr);
 
-            string cid=gen_id();
-            string H=cid+" HEADER "+to_string(n)+" "+to_string(m)+" "+to_string(s)+" "+to_string(t);
-            sendto(sock,H.c_str(),H.size(),0,(sockaddr*)&srv,sizeof(srv));
+            string cid = gen_id();
+            string H = cid + " HEADER " + to_string(n) + " " + to_string(m) + " " + to_string(s) + " " + to_string(t);
+            sendto(sock, H.c_str(), H.size(), 0, (sockaddr*)&srv, sizeof(srv));
 
             for(int i=0;i<n;i++){
-                string row=cid+" ROW";
-                for(int e=0;e<m;e++) row+=" "+to_string(mat[i*m+e]);
-                sendto(sock,row.c_str(),row.size(),0,(sockaddr*)&srv,sizeof(srv));
+                string row = cid + " ROW";
+                for(int e=0;e<m;e++) row += " " + to_string(mat[i*m+e]);
+                sendto(sock, row.c_str(), row.size(), 0, (sockaddr*)&srv, sizeof(srv));
             }
 
-            string W=cid+" WEIGHTS";
-            for(int x:weights) W+=" "+to_string(x);
-            sendto(sock,W.c_str(),W.size(),0,(sockaddr*)&srv,sizeof(srv));
+            string W = cid + " WEIGHTS";
+            for(int x:weights) W += " " + to_string(x);
+            sendto(sock, W.c_str(), W.size(), 0, (sockaddr*)&srv, sizeof(srv));
 
-            string FIN=cid+" FIN";
-            sendto(sock,FIN.c_str(),FIN.size(),0,(sockaddr*)&srv,sizeof(srv));
+            string FIN = cid + " FIN";
+            sendto(sock, FIN.c_str(), FIN.size(), 0, (sockaddr*)&srv, sizeof(srv));
 
-            char buf[4096]; sockaddr_in from; socklen_t L=sizeof(from);
-            int r=recvfrom(sock,buf,4095,0,(sockaddr*)&from,&L); buf[r]='\0';
+            char buf[4096]; sockaddr_in from; socklen_t L = sizeof(from);
+            int r = recvfrom(sock, buf, 4095, 0, (sockaddr*)&from, &L);
+            buf[r] = '\0';
 
-            auto p=split_ws(buf);
-            if(p.size()>=4 && p[1]=="OK"){
-                cout<<"\n=== RESULT (UDP) ===\nPath length: "<<p[2]<<"\nPath: ";
-                int sz=stoi(p[3]);
-                for(int i=0;i<sz;i++) cout<<p[4+i]<<(i+1<sz?"->":"");
-                cout<<"\n";
-            } else cout<<"Server error: "<<buf<<"\n";
+            auto p = split_ws(buf);
+            if(p.size() >= 4 && p[1] == "OK"){
+                cout << "\n=== RESULT (UDP) ===\nPath length: " << p[2] << "\nPath: ";
+                int sz = stoi(p[3]);
+                for(int i=0;i<sz;i++) cout << p[4+i] << (i+1<sz?"->":"");
+                cout << "\n";
+            } else cout << "Server error: " << buf << "\n";
 
             close(sock);
         }
     }
 
     cout << "Client exiting...\n";
-    return 0;
-}
