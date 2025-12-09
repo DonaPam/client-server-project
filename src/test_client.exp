@@ -1,34 +1,122 @@
 #!/usr/bin/expect -f
 
-set timeout 10
+# Test client with expect
+# Usage: test_client.exp <ip> <protocol> <port> <graph_file> <test_id>
+
+set timeout 30
 set ip [lindex $argv 0]
 set protocol [lindex $argv 1]
 set port [lindex $argv 2]
 set test_file [lindex $argv 3]
+set test_id [lindex $argv 4]
 
-# Démarrage du client
+puts "\n=== Test $test_id ==="
+puts "Server: $ip:$port ($protocol)"
+puts "Graph file: $test_file"
+
+# Start client
 spawn ./client $ip $protocol $port
 
-# Attendre le prompt de choix de source
-expect "■ Data source?"
-send "2\r"  # Choix fichier
-
-expect "File name:"
-send "$test_file\r"
-
-# Attendre le résultat
 expect {
+    "■ Data source?" {
+        send "2\r"
+        exp_continue
+    }
+    "File name:" {
+        send "$test_file\r"
+        exp_continue
+    }
+    "Number of vertices*" {
+        # Manual input mode - this shouldn't happen with file mode
+        puts "\n  WARNING: Client entered manual input mode unexpectedly"
+        send "exit\r"
+        exit 1
+    }
     "=== RESULT *===" {
-        puts "\n✅ Test succeed"
+        puts "\n RESULT FOUND"
+        set output $expect_out(buffer)
+        
+        # Extract path length
+        if {[regexp {Path length: (\d+)} $output match length]} {
+            puts "Path length: $length"
+        }
+        
+        # Extract path
+        if {[regexp {Path: (.*)$} $output match path]} {
+            puts "Path: $path"
+        }
+        
+        # Check for specific expected results based on test file
+        switch $test_id {
+            "TCP_simple" - "UDP_simple" {
+                if {[regexp {Path length: 15} $output]} {
+                    puts " CORRECT: Expected path length 15"
+                } else {
+                    puts "  UNEXPECTED: Path length different from expected"
+                }
+            }
+            "TCP_medium" - "UDP_medium" {
+                if {[regexp {Path length: 1[0-9]} $output]} {
+                    puts " Path length within expected range"
+                }
+            }
+        }
+        
         expect eof
         exit 0
     }
-    timeout {
-        puts "\n❌ Timeout - no response"
-        exit 1
-    }
     "Error:*" {
-        puts "\n❌ Error détected"
+        puts "\n ERROR DETECTED"
+        set output $expect_out(buffer)
+        puts "Error message: $output"
         exit 1
     }
+    "Unable to open file" {
+        puts "\n FILE NOT FOUND: $test_file"
+        puts "Current directory: [pwd]"
+        puts "Trying to list test files..."
+        exec ls -la tests/data/
+        exit 1
+    }
+    "Invalid n and m values" {
+        puts "\n  VALIDATION ERROR: Invalid graph parameters"
+        exit 1
+    }
+    "n and m out of bounds" {
+        puts "\n  VALIDATION ERROR: n,m out of bounds [6..19]"
+        exit 1
+    }
+    "Server error:*" {
+        puts "\n SERVER ERROR"
+        set output $expect_out(buffer)
+        puts "Server response: $output"
+        exit 1
+    }
+    "Connection lost with server" {
+        puts "\n CONNECTION LOST"
+        exit 1
+    }
+    timeout {
+        puts "\n TIMEOUT - No response after 30 seconds"
+        puts "Current buffer: $expect_out(buffer)"
+        exit 1
+    }
+    eof {
+        puts "\n CONNECTION CLOSED"
+        set output $expect_out(buffer)
+        if {[string length $output] > 0} {
+            puts "Final output: $output"
+        }
+        exit 0
+    }
+}
+
+# Wait for process to finish
+wait
+
+# Check exit status
+set exit_code [lindex [wait] 3]
+if {$exit_code != 0} {
+    puts "\n Client exited with code: $exit_code"
+    exit $exit_code
 }
