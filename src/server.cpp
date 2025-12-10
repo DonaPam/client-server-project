@@ -361,6 +361,10 @@ int main(int argc,char**argv){
         UdpPacketHeader *h = (UdpPacketHeader*)buf_raw;
         string cid(h->cid, 8);
 
+        cout << "[UDP] Received packet type=" << (int)h->type 
+         << " from CID=" << cid 
+         << " size=" << r << " bytes\n";
+        
         lock_guard<mutex> lk(U_m);
         auto &B = U[cid];
         B.addr = from;
