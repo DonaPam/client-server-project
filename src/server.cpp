@@ -1,99 +1,83 @@
+// server.cpp - Version corrigée
 // Compile: g++ server.cpp -o server -std=c++17 -pthread
+
 #include <bits/stdc++.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <signal.h>
-#include <poll.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <atomic>
 #include "protocol.h"
 using namespace std;
 
-// ---- Variables globales pour gestion propre ----
-atomic<bool> server_running{true};
-mutex log_mutex;
+// ==================== VARIABLES GLOBALES ====================
+atomic<bool> running(true);
+mutex client_count_mutex;
+int active_clients = 0;
+const int MAX_CLIENTS = 10;  // Plus que 3 comme exigé
 
-void log_msg(const string& msg) {
-    lock_guard<mutex> lock(log_mutex);
-    cout << "[SERVER] " << msg << endl;
-}
-
-// ---- Signal handler ----
-void signal_handler(int sig) {
-    log_msg("Signal " + to_string(sig) + " received, shutting down...");
-    server_running = false;
-}
-
-// ---- Conditions de validation ----
-bool valid_graph_params(int n, int m, int s, int t) {
-    if (n < 6 || n >= 20 || m < 6 || m >= 20) {
-        log_msg("Invalid n/m: " + to_string(n) + "/" + to_string(m));
-        return false;
-    }
-    if (s < 0 || s >= n || t < 0 || t >= n) {
-        log_msg("Invalid start/end: " + to_string(s) + "/" + to_string(t));
-        return false;
-    }
-    return true;
-}
-
-bool validate_incidence_matrix(int n, int m, const vector<vector<int8_t>>& inc) {
-    // Vérifie que chaque arête a exactement 2 sommets non nuls
-    for (int e = 0; e < m; e++) {
-        int count = 0;
-        for (int v = 0; v < n; v++) {
-            if (inc[v][e] != 0) count++;
-        }
-        if (count != 2) {
-            log_msg("Edge " + to_string(e) + " has " + to_string(count) + " endpoints (expected 2)");
-            return false;
-        }
-    }
-    return true;
-}
-
-// ---- Split ----
-vector<string> split_ws(const string& s) {
+// ==================== FONCTIONS UTILITAIRES ====================
+vector<string> split_ws(const string &s) {
     vector<string> out;
-    string token;
+    string t;
     for (char c : s) {
-        if (isspace(c)) {
-            if (!token.empty()) {
-                out.push_back(token);
-                token.clear();
+        if (isspace((unsigned char)c)) {
+            if (!t.empty()) {
+                out.push_back(t);
+                t.clear();
             }
         } else {
-            token += c;
+            t.push_back(c);
         }
     }
-    if (!token.empty()) out.push_back(token);
+    if (!t.empty()) out.push_back(t);
     return out;
 }
 
-// ---- Dijkstra ----
+bool valid_graph_params(int n, int m) {
+    return (n >= MIN_VERTICES && n <= MAX_VERTICES && 
+            m >= MIN_VERTICES && m <= MAX_EDGES);
+}
+
+// ==================== DIJKSTRA (poids non-négatifs) ====================
 struct PathResult {
     long long dist;
     vector<int> path;
     bool ok;
+    
+    PathResult() : dist(LLONG_MAX), ok(false) {}
 };
 
-PathResult dijkstra(int n, const vector<vector<pair<int,int>>>& adj, int S, int T) {
-    const long long INF = 1e18;
+PathResult dijkstra(int n, vector<vector<pair<int, int>>>& adj, int S, int T) {
+    const long long INF = LLONG_MAX / 2;
     vector<long long> dist(n, INF);
     vector<int> parent(n, -1);
+    vector<bool> visited(n, false);
+    
     dist[S] = 0;
     
-    priority_queue<pair<long long,int>, vector<pair<long long,int>>, greater<>> pq;
+    // Priority queue avec paires (distance, sommet)
+    using pii = pair<long long, int>;
+    priority_queue<pii, vector<pii>, greater<pii>> pq;
     pq.push({0, S});
     
     while (!pq.empty()) {
-        auto [d, u] = pq.top(); pq.pop();
-        if (d != dist[u]) continue;
+        auto [d, u] = pq.top();
+        pq.pop();
+        
+        if (visited[u]) continue;
+        visited[u] = true;
+        
         if (u == T) break;
         
-        for (const auto& [v, w] : adj[u]) {
-            if (dist[v] > dist[u] + w) {
+        for (auto &edge : adj[u]) {
+            int v = edge.first;
+            int w = edge.second;
+            
+            if (!visited[v] && dist[u] + w < dist[v]) {
                 dist[v] = dist[u] + w;
                 parent[v] = u;
                 pq.push({dist[v], v});
@@ -109,452 +93,478 @@ PathResult dijkstra(int n, const vector<vector<pair<int,int>>>& adj, int S, int 
     
     result.ok = true;
     result.dist = dist[T];
-    int cur = T;
-    while (cur != -1) {
-        result.path.push_back(cur);
-        cur = parent[cur];
+    
+    // Reconstruire chemin
+    int node = T;
+    while (node != -1) {
+        result.path.push_back(node);
+        node = parent[node];
     }
     reverse(result.path.begin(), result.path.end());
+    
     return result;
 }
 
-// ---- Build graph ----
-vector<vector<pair<int,int>>> build_adj(int n, int m, 
-                                        const vector<vector<int8_t>>& inc,
-                                        const vector<int16_t>& weights) {
-    vector<vector<pair<int,int>>> adj(n);
+// ==================== CONSTRUCTION GRAPHE ====================
+vector<vector<pair<int, int>>> build_adjacency(int n, int m, 
+                                              vector<int>& inc_mat, 
+                                              vector<int>& weights) {
+    vector<vector<pair<int, int>>> adj(n);
     
     for (int e = 0; e < m; e++) {
         int u = -1, v = -1;
+        
+        // Trouver les deux sommets connectés par cette arête
         for (int vertex = 0; vertex < n; vertex++) {
-            if (inc[vertex][e] != 0) {
-                if (u == -1) u = vertex;
-                else if (v == -1) v = vertex;
+            int val = inc_mat[vertex * m + e];
+            if (val != 0) {
+                if (u == -1) {
+                    u = vertex;
+                } else if (v == -1) {
+                    v = vertex;
+                    break;
+                }
             }
         }
         
-        if (u != -1 && v != -1) {
-            int w = abs(weights[e]);
-            adj[u].push_back({v, w});
-            adj[v].push_back({u, w});
+        if (u != -1 && v != -1 && weights[e] >= 0) {
+            // Graphe non-orienté, arête dans les deux directions
+            adj[u].push_back({v, weights[e]});
+            adj[v].push_back({u, weights[e]});
         }
     }
     
     return adj;
 }
 
-// ---- TCP Client Handler avec multiplexage ----
-void handle_tcp_client(int client_fd, const sockaddr_in& client_addr) {
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    int client_port = ntohs(client_addr.sin_port);
+// ==================== GESTIONNAIRE TCP ====================
+void handle_tcp_client(int client_fd, sockaddr_in client_addr) {
+    {
+        lock_guard<mutex> lock(client_count_mutex);
+        if (active_clients >= MAX_CLIENTS) {
+            cerr << "Refusé: trop de clients (" << active_clients << "/" 
+                 << MAX_CLIENTS << ")" << endl;
+            close(client_fd);
+            return;
+        }
+        active_clients++;
+    }
     
-    log_msg("TCP client connected from " + string(client_ip) + ":" + to_string(client_port));
+    cout << "[TCP] Client connecté: " << inet_ntoa(client_addr.sin_addr) 
+         << ":" << ntohs(client_addr.sin_port) 
+         << " (" << active_clients << " clients actifs)" << endl;
     
-    // Recevoir la requête
+    // Recevoir requête
     GraphRequest req;
     ssize_t bytes = recv(client_fd, &req, sizeof(req), MSG_WAITALL);
     
     if (bytes != sizeof(req)) {
-        log_msg("TCP client " + string(client_ip) + " sent invalid request");
+        cerr << "[TCP] Requête incomplète" << endl;
         close(client_fd);
+        {
+            lock_guard<mutex> lock(client_count_mutex);
+            active_clients--;
+        }
         return;
     }
     
-    // Validation
-    if (!valid_graph_params(req.vertices, req.edges, req.start_node, req.end_node)) {
-        GraphResponse resp{};
-        resp.error_code = 1;
-        resp.path_length = -1;
-        strcpy(resp.message, "Invalid graph parameters");
+    // Préparer réponse
+    GraphResponse resp;
+    resp.error_code = 1; // Erreur par défaut
+    
+    // Valider paramètres
+    if (!valid_graph_params(req.vertices, req.edges)) {
+        snprintf(resp.message, sizeof(resp.message), 
+                "Paramètres invalides: n=%d (min=%d,max=%d), m=%d (min=%d,max=%d)",
+                req.vertices, MIN_VERTICES, MAX_VERTICES,
+                req.edges, MIN_VERTICES, MAX_EDGES);
         send(client_fd, &resp, sizeof(resp), 0);
         close(client_fd);
+        {
+            lock_guard<mutex> lock(client_count_mutex);
+            active_clients--;
+        }
         return;
     }
     
-    int n = req.vertices, m = req.edges;
-    vector<vector<int8_t>> inc(n, vector<int8_t>(m, 0));
-    vector<int16_t> weights(m, 1);
+    int n = req.vertices;
+    int m = req.edges;
     
     // Recevoir matrice d'incidence
-    bytes = recv(client_fd, inc[0].data(), n * m * sizeof(int8_t), MSG_WAITALL);
-    if (bytes != (ssize_t)(n * m * sizeof(int8_t))) {
-        log_msg("Failed to receive incidence matrix from " + string(client_ip));
+    vector<int> inc_mat(n * m);
+    bytes = recv(client_fd, inc_mat.data(), inc_mat.size() * sizeof(int), MSG_WAITALL);
+    
+    if (bytes != (ssize_t)(inc_mat.size() * sizeof(int))) {
+        strcpy(resp.message, "Erreur réception matrice");
+        send(client_fd, &resp, sizeof(resp), 0);
         close(client_fd);
+        {
+            lock_guard<mutex> lock(client_count_mutex);
+            active_clients--;
+        }
         return;
     }
     
     // Recevoir poids
-    bytes = recv(client_fd, weights.data(), m * sizeof(int16_t), MSG_WAITALL);
-    if (bytes != (ssize_t)(m * sizeof(int16_t))) {
-        log_msg("Failed to receive weights from " + string(client_ip));
-        close(client_fd);
-        return;
-    }
+    vector<int> weights(m);
+    bytes = recv(client_fd, weights.data(), weights.size() * sizeof(int), MSG_WAITALL);
     
-    // Validation de la matrice
-    if (!validate_incidence_matrix(n, m, inc)) {
-        GraphResponse resp{};
-        resp.error_code = 1;
-        resp.path_length = -1;
-        strcpy(resp.message, "Invalid incidence matrix");
+    if (bytes != (ssize_t)(weights.size() * sizeof(int))) {
+        strcpy(resp.message, "Erreur réception poids");
         send(client_fd, &resp, sizeof(resp), 0);
         close(client_fd);
+        {
+            lock_guard<mutex> lock(client_count_mutex);
+            active_clients--;
+        }
         return;
     }
     
-    // Construction et calcul
-    auto adj = build_adj(n, m, inc, weights);
+    // Vérifier poids non-négatifs
+    bool valid_weights = true;
+    for (int w : weights) {
+        if (w < 0) {
+            valid_weights = false;
+            break;
+        }
+    }
+    
+    if (!valid_weights) {
+        strcpy(resp.message, "Poids négatifs non autorisés");
+        send(client_fd, &resp, sizeof(resp), 0);
+        close(client_fd);
+        {
+            lock_guard<mutex> lock(client_count_mutex);
+            active_clients--;
+        }
+        return;
+    }
+    
+    // Construire graphe et exécuter Dijkstra
+    auto adj = build_adjacency(n, m, inc_mat, weights);
     auto result = dijkstra(n, adj, req.start_node, req.end_node);
     
-    // Préparer réponse
-    GraphResponse resp{};
     if (!result.ok) {
-        resp.error_code = 1;
+        resp.error_code = 2;
         resp.path_length = -1;
         resp.path_size = 0;
-        strcpy(resp.message, "No path found");
+        strcpy(resp.message, "Pas de chemin trouvé");
     } else {
         resp.error_code = 0;
-        resp.path_length = (int)result.dist;
-        resp.path_size = min((int)result.path.size(), MAX_VERTICES);
-        for (int i = 0; i < resp.path_size; i++) {
+        resp.path_length = result.dist;
+        resp.path_size = min((size_t)128, result.path.size());
+        
+        for (size_t i = 0; i < resp.path_size; i++) {
             resp.path[i] = result.path[i];
         }
+        
         strcpy(resp.message, "OK");
     }
     
     // Envoyer réponse
     send(client_fd, &resp, sizeof(resp), 0);
-    log_msg("TCP response sent to " + string(client_ip));
-    
     close(client_fd);
-}
-
-// ---- UDP Handler fiable ----
-bool send_udp_ack(int udp_fd, const sockaddr_in& client_addr, uint32_t packet_id, uint32_t session_id) {
-    UdpPacketHeader ack_header{};
-    ack_header.packet_id = packet_id;
-    ack_header.session_id = session_id;
-    ack_header.packet_type = UDP_ACK;
-    ack_header.total_chunks = 1;
-    ack_header.chunk_index = 0;
-    ack_header.data_size = 0;
     
-    return sendto(udp_fd, &ack_header, sizeof(ack_header), 0,
-                  (const sockaddr*)&client_addr, sizeof(client_addr)) > 0;
-}
-
-void handle_udp_session(int udp_fd, const string& session_id_str, 
-                        const vector<vector<uint8_t>>& data_chunks,
-                        const sockaddr_in& client_addr) {
-    
-    uint32_t session_id = stoul(session_id_str);
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    
-    // Reconstruire les données
-    vector<uint8_t> full_data;
-    for (const auto& chunk : data_chunks) {
-        full_data.insert(full_data.end(), chunk.begin(), chunk.end());
+    {
+        lock_guard<mutex> lock(client_count_mutex);
+        active_clients--;
     }
     
-    if (full_data.size() < sizeof(GraphDataUdp)) {
-        log_msg("UDP incomplete data from " + string(client_ip));
-        return;
-    }
+    cout << "[TCP] Client déconnecté (" << active_clients << " clients restants)" << endl;
+}
+
+// ==================== GESTIONNAIRE UDP ====================
+class UDPServer {
+private:
+    int udp_socket;
+    unordered_map<string, pair<vector<string>, sockaddr_in>> client_data;
+    mutex data_mutex;
     
-    GraphDataUdp* graph_data = reinterpret_cast<GraphDataUdp*>(full_data.data());
-    
-    // Validation
-    if (!valid_graph_params(graph_data->vertices, graph_data->edges, 
-                           graph_data->start_node, graph_data->end_node)) {
-        UdpPacketHeader error_header{};
-        error_header.packet_id = 0;
-        error_header.session_id = session_id;
-        error_header.packet_type = UDP_ERROR;
-        error_header.data_size = 0;
-        sendto(udp_fd, &error_header, sizeof(error_header), 0,
+    void send_ack(const string& client_id, const sockaddr_in& client_addr) {
+        UdpDataPacket ack;
+        memcpy(ack.header.client_id, client_id.c_str(), 16);
+        ack.header.packet_type = UDP_ACK;
+        ack.header.seq_num = 0;
+        ack.header.total_packets = 1;
+        ack.header.current_packet = 0;
+        
+        sendto(udp_socket, &ack, sizeof(UdpHeader), 0,
                (const sockaddr*)&client_addr, sizeof(client_addr));
-        return;
     }
     
-    int n = graph_data->vertices;
-    int m = graph_data->edges;
+    void process_client_data(const string& client_id) {
+        lock_guard<mutex> lock(data_mutex);
+        
+        if (client_data.find(client_id) == client_data.end()) {
+            return;
+        }
+        
+        auto& data = client_data[client_id];
+        auto& messages = data.first;
+        sockaddr_in client_addr = data.second;
+        
+        // Traiter les messages
+        int n = 0, m = 0, s = 0, t = 0;
+        vector<vector<int>> inc_mat;
+        vector<int> weights;
+        
+        for (const string& msg : messages) {
+            auto parts = split_ws(msg);
+            if (parts.size() < 2) continue;
+            
+            if (parts[1] == "HEADER" && parts.size() >= 6) {
+                n = stoi(parts[2]);
+                m = stoi(parts[3]);
+                s = stoi(parts[4]);
+                t = stoi(parts[5]);
+                inc_mat.resize(n, vector<int>(m, 0));
+            } 
+            else if (parts[1] == "ROW") {
+                int row_idx = stoi(parts[0]); // Première partie = numéro de ligne
+                if (row_idx >= 0 && row_idx < n) {
+                    for (int j = 0; j < m && j + 2 < (int)parts.size(); j++) {
+                        inc_mat[row_idx][j] = stoi(parts[j + 2]);
+                    }
+                }
+            }
+            else if (parts[1] == "WEIGHTS") {
+                for (size_t i = 2; i < parts.size(); i++) {
+                    weights.push_back(stoi(parts[i]));
+                }
+            }
+        }
+        
+        // Vérifier données complètes
+        if (n == 0 || m == 0 || weights.size() != (size_t)m) {
+            string error_msg = "SERVER_RESPONSE ERROR Données incomplètes";
+            sendto(udp_socket, error_msg.c_str(), error_msg.size(), 0,
+                   (const sockaddr*)&client_addr, sizeof(client_addr));
+            client_data.erase(client_id);
+            return;
+        }
+        
+        // Valider paramètres
+        if (!valid_graph_params(n, m)) {
+            string error_msg = "SERVER_RESPONSE ERROR Paramètres hors limites";
+            sendto(udp_socket, error_msg.c_str(), error_msg.size(), 0,
+                   (const sockaddr*)&client_addr, sizeof(client_addr));
+            client_data.erase(client_id);
+            return;
+        }
+        
+        // Convertir matrice 2D en 1D
+        vector<int> flat_mat(n * m);
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < m; j++) {
+                flat_mat[i * m + j] = inc_mat[i][j];
+            }
+        }
+        
+        // Exécuter Dijkstra
+        auto adj = build_adjacency(n, m, flat_mat, weights);
+        auto result = dijkstra(n, adj, s, t);
+        
+        // Préparer réponse
+        string response;
+        if (!result.ok) {
+            response = "SERVER_RESPONSE ERROR Pas de chemin";
+        } else {
+            response = "SERVER_RESPONSE OK " + to_string(result.dist) + 
+                      " " + to_string(result.path.size());
+            for (int v : result.path) {
+                response += " " + to_string(v);
+            }
+        }
+        
+        // Envoyer réponse
+        sendto(udp_socket, response.c_str(), response.size(), 0,
+               (const sockaddr*)&client_addr, sizeof(client_addr));
+        
+        // Nettoyer
+        client_data.erase(client_id);
+    }
     
-    // Convertir en format interne
-    vector<vector<int8_t>> inc(n, vector<int8_t>(m));
-    vector<int16_t> weights(m);
+public:
+    UDPServer(int port) {
+        udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_socket < 0) {
+            perror("socket UDP");
+            exit(1);
+        }
+        
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = INADDR_ANY;
+        
+        if (bind(udp_socket, (sockaddr*)&addr, sizeof(addr)) < 0) {
+            perror("bind UDP");
+            close(udp_socket);
+            exit(1);
+        }
+        
+        cout << "[UDP] Socket lié au port " << port << endl;
+    }
     
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            inc[i][j] = graph_data->inc_matrix[i][j];
+    void run() {
+        while (running) {
+            char buffer[2048];
+            sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
+            
+            ssize_t bytes = recvfrom(udp_socket, buffer, sizeof(buffer) - 1, 0,
+                                    (sockaddr*)&client_addr, &client_len);
+            
+            if (bytes <= 0) continue;
+            
+            buffer[bytes] = '\0';
+            string message(buffer);
+            auto parts = split_ws(message);
+            
+            if (parts.size() < 2) continue;
+            
+            string client_id = parts[0];
+            string packet_type = parts[1];
+            
+            cout << "[UDP] Paquet de " << inet_ntoa(client_addr.sin_addr) 
+                 << ":" << ntohs(client_addr.sin_port) 
+                 << " Type: " << packet_type << endl;
+            
+            // Envoyer ACK immédiatement
+            send_ack(client_id, client_addr);
+            
+            {
+                lock_guard<mutex> lock(data_mutex);
+                client_data[client_id].first.push_back(message);
+                client_data[client_id].second = client_addr;
+                
+                // Si FIN reçu, traiter
+                if (packet_type == "FIN") {
+                    thread([this, client_id]() {
+                        this->process_client_data(client_id);
+                    }).detach();
+                }
+            }
         }
     }
     
-    for (int j = 0; j < m; j++) {
-        weights[j] = graph_data->weights[j];
+    ~UDPServer() {
+        if (udp_socket >= 0) close(udp_socket);
     }
-    
-    // Validation
-    if (!validate_incidence_matrix(n, m, inc)) {
-        UdpPacketHeader error_header{};
-        error_header.packet_id = 0;
-        error_header.session_id = session_id;
-        error_header.packet_type = UDP_ERROR;
-        sendto(udp_fd, &error_header, sizeof(error_header), 0,
-               (const sockaddr*)&client_addr, sizeof(client_addr));
-        return;
-    }
-    
-    // Calcul
-    auto adj = build_adj(n, m, inc, weights);
-    auto result = dijkstra(n, adj, graph_data->start_node, graph_data->end_node);
-    
-    // Préparer réponse
-    if (!result.ok) {
-        UdpPacketHeader error_header{};
-        error_header.packet_id = 0;
-        error_header.session_id = session_id;
-        error_header.packet_type = UDP_ERROR;
-        strcpy((char*)error_header.reserved, "No path");
-        sendto(udp_fd, &error_header, sizeof(error_header), 0,
-               (const sockaddr*)&client_addr, sizeof(client_addr));
-        return;
-    }
-    
-    // Envoyer réponse en chunks
-    string response_data = "OK " + to_string(result.dist) + " " + 
-                          to_string(result.path.size());
-    for (int v : result.path) {
-        response_data += " " + to_string(v);
-    }
-    
-    const size_t chunk_size = 512;
-    size_t total_chunks = (response_data.size() + chunk_size - 1) / chunk_size;
-    
-    for (size_t i = 0; i < total_chunks; i++) {
-        UdpPacketHeader resp_header{};
-        resp_header.packet_id = i + 1;
-        resp_header.session_id = session_id;
-        resp_header.packet_type = UDP_DATA;
-        resp_header.total_chunks = total_chunks;
-        resp_header.chunk_index = i;
-        
-        size_t offset = i * chunk_size;
-        size_t size = min(chunk_size, response_data.size() - offset);
-        resp_header.data_size = size;
-        
-        // Envoyer header + données
-        vector<uint8_t> packet(sizeof(resp_header) + size);
-        memcpy(packet.data(), &resp_header, sizeof(resp_header));
-        memcpy(packet.data() + sizeof(resp_header), 
-               response_data.data() + offset, size);
-        
-        sendto(udp_fd, packet.data(), packet.size(), 0,
-               (const sockaddr*)&client_addr, sizeof(client_addr));
-    }
-    
-    // Envoyer FIN
-    UdpPacketHeader fin_header{};
-    fin_header.packet_id = 0;
-    fin_header.session_id = session_id;
-    fin_header.packet_type = UDP_FIN;
-    sendto(udp_fd, &fin_header, sizeof(fin_header), 0,
-           (const sockaddr*)&client_addr, sizeof(client_addr));
-    
-    log_msg("UDP response sent to " + string(client_ip));
+};
+
+// ==================== GESTION SIGNALS ====================
+void signal_handler(int sig) {
+    cout << "\nSignal " << sig << " reçu, arrêt du serveur..." << endl;
+    running = false;
 }
 
-// ---- Main Server ----
+// ==================== MAIN ====================
 int main(int argc, char* argv[]) {
     if (argc != 2) {
-        cerr << "Usage: " << argv[0] << " <port>\n";
+        cout << "Usage: ./server <port>" << endl;
         return 1;
     }
     
     int port = stoi(argv[1]);
     
-    // Configuration des signaux
+    // Configurer handlers de signaux
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    // Création sockets
-    int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    
-    if (tcp_fd < 0 || udp_fd < 0) {
-        perror("socket");
+    // Socket TCP
+    int tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_socket < 0) {
+        perror("socket TCP");
         return 1;
     }
     
-    // Options de socket
+    // Réutiliser l'adresse
     int opt = 1;
-    setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(udp_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(tcp_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     
-    // Configuration adresse
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = INADDR_ANY;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
     
-    if (bind(tcp_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0 ||
-        bind(udp_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
+    if (bind(tcp_socket, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind TCP");
+        close(tcp_socket);
         return 1;
     }
     
-    if (listen(tcp_fd, 10) < 0) {
+    if (listen(tcp_socket, MAX_CLIENTS) < 0) {
         perror("listen");
+        close(tcp_socket);
         return 1;
     }
     
-    // Mode non-bloquant pour UDP
-    fcntl(udp_fd, F_SETFL, O_NONBLOCK);
+    cout << "=== Serveur Graphes Théorie ===" << endl;
+    cout << "Port: " << port << endl;
+    cout << "Clients maximum: " << MAX_CLIENTS << endl;
+    cout << "Poids: non-négatifs arbitraires (3ème année)" << endl;
+    cout << "Algorithmes: Dijkstra" << endl;
+    cout << "Appuyez sur Ctrl+C pour arrêter" << endl;
     
-    log_msg("Server started on port " + to_string(port) + " (TCP+UDP)");
-    log_msg("Press Ctrl+C to stop");
+    // Démarrer serveur UDP dans un thread
+    UDPServer udp_server(port);
+    thread udp_thread([&udp_server]() {
+        udp_server.run();
+    });
     
-    // Structures pour multiplexage
-    struct pollfd fds[2];
-    fds[0].fd = tcp_fd;
-    fds[0].events = POLLIN;
-    fds[1].fd = udp_fd;
-    fds[1].events = POLLIN;
+    // Accepter connections TCP
+    fd_set read_fds;
+    int max_fd = tcp_socket;
     
-    // Structures pour sessions UDP
-    unordered_map<string, pair<sockaddr_in, vector<vector<uint8_t>>>> udp_sessions;
-    unordered_map<string, chrono::steady_clock::time_point> session_timeouts;
-    mutex udp_mutex;
-    
-    // Thread pool pour TCP clients (max 10 threads simultanés)
-    vector<thread> tcp_threads;
-    mutex threads_mutex;
-    
-    // Boucle principale
-    while (server_running) {
-        int ready = poll(fds, 2, 100); // Timeout 100ms
+    while (running) {
+        FD_ZERO(&read_fds);
+        FD_SET(tcp_socket, &read_fds);
         
-        if (ready < 0 && errno != EINTR) {
-            perror("poll");
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+        
+        if (activity < 0 && errno != EINTR) {
+            perror("select");
             break;
         }
         
-        // Accepter connexions TCP
-        if (fds[0].revents & POLLIN) {
-            sockaddr_in client_addr{};
+        if (activity > 0 && FD_ISSET(tcp_socket, &read_fds)) {
+            sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
-            int client_fd = accept(tcp_fd, (sockaddr*)&client_addr, &client_len);
+            
+            int client_fd = accept(tcp_socket, (sockaddr*)&client_addr, &client_len);
             
             if (client_fd >= 0) {
-                // Nettoyer les threads terminés
-                {
-                    lock_guard<mutex> lock(threads_mutex);
-                    tcp_threads.erase(
-                        remove_if(tcp_threads.begin(), tcp_threads.end(),
-                                  [](thread& t) { return !t.joinable(); }),
-                        tcp_threads.end()
-                    );
-                    
-                    // Limiter à 10 threads simultanés
-                    if (tcp_threads.size() < 10) {
-                        tcp_threads.emplace_back([client_fd, client_addr]() {
-                            handle_tcp_client(client_fd, client_addr);
-                        });
-                    } else {
-                        log_msg("Too many TCP clients, rejecting connection");
-                        close(client_fd);
-                    }
-                }
-            }
-        }
-        
-        // Traiter données UDP
-        if (fds[1].revents & POLLIN) {
-            UdpPacketHeader header;
-            sockaddr_in client_addr{};
-            socklen_t client_len = sizeof(client_addr);
-            
-            // Lire header
-            ssize_t bytes = recvfrom(udp_fd, &header, sizeof(header), MSG_PEEK,
-                                    (sockaddr*)&client_addr, &client_len);
-            
-            if (bytes == sizeof(header)) {
-                char client_ip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-                string session_key = string(client_ip) + ":" + 
-                                   to_string(ntohs(client_addr.sin_port)) + ":" +
-                                   to_string(header.session_id);
-                
-                // Envoyer ACK immédiatement
-                if (header.packet_type == UDP_DATA) {
-                    send_udp_ack(udp_fd, client_addr, header.packet_id, header.session_id);
-                    
-                    // Lire données complètes
-                    vector<uint8_t> buffer(sizeof(header) + header.data_size);
-                    bytes = recvfrom(udp_fd, buffer.data(), buffer.size(), 0,
-                                    (sockaddr*)&client_addr, &client_len);
-                    
-                    if (bytes > 0) {
-                        lock_guard<mutex> lock(udp_mutex);
-                        
-                        // Stocker données
-                        vector<uint8_t> data(buffer.begin() + sizeof(header), buffer.end());
-                        if (udp_sessions.find(session_key) == udp_sessions.end()) {
-                            udp_sessions[session_key] = {client_addr, {}};
-                        }
-                        udp_sessions[session_key].second.push_back(data);
-                        session_timeouts[session_key] = chrono::steady_clock::now();
-                        
-                        // Si FIN reçu, traiter la session
-                        if (header.packet_type == UDP_FIN) {
-                            thread([udp_fd, session_key, &udp_sessions, &udp_mutex]() {
-                                lock_guard<mutex> lock(udp_mutex);
-                                if (udp_sessions.find(session_key) != udp_sessions.end()) {
-                                    auto& session = udp_sessions[session_key];
-                                    handle_udp_session(udp_fd, 
-                                                      session_key.substr(session_key.find_last_of(':') + 1),
-                                                      session.second, session.first);
-                                    udp_sessions.erase(session_key);
-                                }
-                            }).detach();
-                        }
-                    }
-                }
-            }
-            
-            // Nettoyer les sessions UDP expirées (> 30 secondes)
-            auto now = chrono::steady_clock::now();
-            lock_guard<mutex> lock(udp_mutex);
-            for (auto it = session_timeouts.begin(); it != session_timeouts.end();) {
-                if (chrono::duration_cast<chrono::seconds>(now - it->second).count() > 30) {
-                    udp_sessions.erase(it->first);
-                    it = session_timeouts.erase(it);
-                } else {
-                    ++it;
-                }
+                // Démarrer thread pour client TCP
+                thread([client_fd, client_addr]() {
+                    handle_tcp_client(client_fd, client_addr);
+                }).detach();
             }
         }
     }
     
     // Nettoyage
-    log_msg("Shutting down server...");
+    cout << "Arrêt du serveur..." << endl;
+    running = false;
     
-    // Fermer sockets
-    close(tcp_fd);
-    close(udp_fd);
+    if (udp_thread.joinable()) {
+        udp_thread.join();
+    }
     
-    // Attendre threads TCP
+    close(tcp_socket);
+    
     {
-        lock_guard<mutex> lock(threads_mutex);
-        for (auto& t : tcp_threads) {
-            if (t.joinable()) {
-                t.join();
-            }
+        lock_guard<mutex> lock(client_count_mutex);
+        if (active_clients > 0) {
+            cout << "Attente de déconnexion de " << active_clients << " client(s)..." << endl;
+            sleep(2);
         }
     }
     
-    log_msg("Server stopped");
+    cout << "Serveur arrêté" << endl;
     return 0;
 }
