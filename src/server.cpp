@@ -7,182 +7,228 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <atomic>
+#include <mutex>
 #include "protocol.h"
 using namespace std;
 
+/*==========================================================================
+ * VALIDATION UTILITIES
+ *==========================================================================*/
+
 bool valid_nm(int n, int m){
-    return (n >=6 && n <20 && m >=6 && m <20);
+    return (n >= 6 && n < 20 && m >= 6 && m < 20);
 }
 
-// split helper
-vector<string> split_ws(const string &s){
-    vector<string> out; string t;
-    for(char c: s){
-        if(isspace((unsigned char)c)){ if(!t.empty()){ out.push_back(t); t.clear(); } }
-        else t.push_back(c);
-    }
-    if(!t.empty()) out.push_back(t);
-    return out;
-}
+/*==========================================================================
+ * DIJKSTRA + GRAPH BUILD
+ *==========================================================================*/
 
-// dijkstra + build_adj same as before
-long long INF = (1LL<<60);
-struct PathResult{ long long dist; vector<int> path; bool ok; };
+long long INF = (1LL << 60);
 
-PathResult dijkstra(int n, vector<vector<pair<int,int>>>& adj,int S,int T){
-    vector<long long> dist(n,INF);
-    vector<int> parent(n,-1);
-    dist[S]=0;
-    priority_queue<pair<long long,int>,vector<pair<long long,int>>,greater<>> pq;
-    pq.push({0,S});
+struct PathResult {
+    long long dist;
+    vector<int> path;
+    bool ok;
+};
+
+PathResult dijkstra(int n, vector<vector<pair<int,int>>>& adj, int S, int T){
+    vector<long long> dist(n, INF);
+    vector<int> parent(n, -1);
+
+    dist[S] = 0;
+    priority_queue<pair<long long,int>, vector<pair<long long,int>>, greater<>> pq;
+    pq.push({0, S});
+
     while(!pq.empty()){
-        auto [d,u]=pq.top(); pq.pop();
-        if(d!=dist[u]) continue;
-        if(u==T) break;
+        auto [d,u] = pq.top();
+        pq.pop();
+        if(d != dist[u]) continue;
+        if(u == T) break;
+
         for(auto &ed: adj[u]){
-            int v=ed.first,w=ed.second;
-            if(dist[v]>dist[u]+w){
-                dist[v]=dist[u]+w;
-                parent[v]=u;
-                pq.push({dist[v],v});
+            int v = ed.first;
+            int w = ed.second;
+            if(dist[v] > dist[u] + w){
+                dist[v] = dist[u] + w;
+                parent[v] = u;
+                pq.push({dist[v], v});
             }
         }
     }
-    PathResult r;
-    if(dist[T]==INF){ r.ok=false; return r; }
-    r.ok=true; r.dist=dist[T];
-    int x=T;
-    while(x!=-1){ r.path.push_back(x); x=parent[x]; }
-    reverse(r.path.begin(),r.path.end());
-    return r;
+
+    PathResult R;
+    if(dist[T] == INF){
+        R.ok = false;
+        return R;
+    }
+
+    R.ok = true;
+    R.dist = dist[T];
+    int x = T;
+
+    while(x != -1){
+        R.path.push_back(x);
+        x = parent[x];
+    }
+    reverse(R.path.begin(), R.path.end());
+    return R;
 }
 
-vector<vector<pair<int,int>>> build_adj(int n,int m, const vector<int>& flat, const vector<int>& W){
+vector<vector<pair<int,int>>> build_adj(int n, int m, const vector<int>& flat, const vector<int>& W){
     vector<vector<pair<int,int>>> adj(n);
-    for(int e=0;e<m;e++){
-        int a=-1,b=-1;
+
+    for(int e=0; e<m; e++){
+        int a=-1, b=-1;
         for(int v=0; v<n; v++){
-            int val = flat[v*m+e];
-            if(val!=0){
-                if(a==-1) a=v;
-                else if(b==-1) b=v;
-                else { a=-2; break; } // more than 2
+            int val = flat[v*m + e];
+            if(val != 0){
+                if(a == -1) a = v;
+                else if(b == -1) b = v;
+                else { a = -2; break; } // invalid
             }
         }
-        if(a<0 || b<0) continue;
+        if(a < 0 || b < 0) continue;
+
         int w = W[e];
-        if(w<0) w = -w;
-        adj[a].push_back({b,w});
-        adj[b].push_back({a,w});
+        if(w < 0) w = -w;
+
+        adj[a].push_back({b, w});
+        adj[b].push_back({a, w});
     }
     return adj;
 }
 
-// ---------------- TCP handler with concurrency limit ----------------
-atomic<int> tcp_clients_count{0};
-const int TCP_CLIENTS_MAX = 3;
+/*==========================================================================
+ * TCP HANDLING (LIMIT 3 CLIENTS)
+ *==========================================================================*/
+
+atomic<int> tcp_clients{0};
+const int TCP_LIMIT = 3;
 
 void handle_tcp(int client){
-    if(tcp_clients_count.fetch_add(1) >= TCP_CLIENTS_MAX){
-        // already exceed, reject politely
-        tcp_clients_count--;
+    if(tcp_clients.fetch_add(1) >= TCP_LIMIT){
+        tcp_clients--;
         GraphResponse resp{};
         resp.error_code = 1;
-        resp.path_length = -1;
-        snprintf(resp.message, sizeof(resp.message), "Server busy: too many TCP clients");
-        send(client,&resp,sizeof(resp),0);
+        strcpy(resp.message, "Server busy: too many TCP clients");
+        send(client, &resp, sizeof(resp), 0);
         close(client);
         return;
     }
 
-    cout<<"[TCP] Client connected. current="<<tcp_clients_count.load()<<"\n";
-    GraphRequest req;
-    if(recv(client,&req,sizeof(req),MSG_WAITALL)!=sizeof(req)){ close(client); tcp_clients_count--; return; }
-
-    GraphResponse resp{}; resp.error_code=1; resp.path_length=-1;
-    if(!valid_nm(req.vertices, req.edges)){
-        snprintf(resp.message,sizeof(resp.message),"n and m should be between >=6 and <20");
-        send(client,&resp,sizeof(resp),0); close(client); tcp_clients_count--; return;
+    GraphRequest req{};
+    if(recv(client, &req, sizeof(req), MSG_WAITALL) != sizeof(req)){
+        close(client);
+        tcp_clients--;
+        return;
     }
-    int n=req.vertices, m=req.edges;
-    if(req.start_node < 0 || req.start_node >= n || req.end_node < 0 || req.end_node >= n){
-        snprintf(resp.message,sizeof(resp.message),"Invalid start/end nodes");
-        send(client,&resp,sizeof(resp),0); close(client); tcp_clients_count--; return;
+
+    GraphResponse resp{};
+    resp.error_code = 1;
+
+    if(!valid_nm(req.vertices, req.edges)){
+        strcpy(resp.message, "n/m invalid.");
+        send(client, &resp, sizeof(resp), 0);
+        close(client);
+        tcp_clients--;
+        return;
+    }
+
+    int n = req.vertices, m = req.edges;
+    int S = req.start_node, T = req.end_node;
+
+    if(S < 0 || S >= n || T < 0 || T >= n){
+        strcpy(resp.message, "Start/end invalid.");
+        send(client, &resp, sizeof(resp), 0);
+        close(client);
+        tcp_clients--;
+        return;
     }
 
     vector<int> mat(n*m);
     vector<int> W(m);
-    ssize_t needMat = (ssize_t)mat.size()*sizeof(int);
-    ssize_t got = recv(client,mat.data(),needMat,MSG_WAITALL);
-    if(got != needMat){ close(client); tcp_clients_count--; return; }
-    ssize_t needW = (ssize_t)W.size()*sizeof(int);
-    got = recv(client,W.data(),needW,MSG_WAITALL);
-    if(got != needW){ close(client); tcp_clients_count--; return; }
 
-    // Validate matrix: for each column e, exactly 2 non-zero entries, signs opposite
-    for(int e=0;e<m;e++){
-        int cnt=0; int pos=-1, neg=-1;
+    ssize_t needMat = n*m*sizeof(int);
+    ssize_t needW   = m*sizeof(int);
+
+    if(recv(client, mat.data(), needMat, MSG_WAITALL) != needMat ||
+       recv(client, W.data(), needW, MSG_WAITALL) != needW)
+    {
+        close(client);
+        tcp_clients--;
+        return;
+    }
+
+    /* Validate columns exactly 2 non-zero entries */
+    for(int e=0; e<m; e++){
+        int cnt=0, pos=-1, neg=-1;
         for(int v=0; v<n; v++){
             int val = mat[v*m+e];
-            if(val!=0){
+            if(val != 0){
                 cnt++;
-                if(val>0) pos=v; else neg=v;
+                if(val > 0) pos=v;
+                else        neg=v;
             }
         }
-        if(cnt!=2 || pos==-1 || neg==-1){
-            snprintf(resp.message,sizeof(resp.message),"Invalid incidence column %d",e);
-            send(client,&resp,sizeof(resp),0); close(client); tcp_clients_count--; return;
+        if(cnt != 2 || pos==-1 || neg==-1){
+            strcpy(resp.message, "Invalid incidence matrix");
+            send(client,&resp,sizeof(resp),0);
+            close(client);
+            tcp_clients--;
+            return;
         }
     }
 
     auto adj = build_adj(n,m,mat,W);
-    auto R = dijkstra(n,adj,req.start_node,req.end_node);
+    auto R = dijkstra(n,adj,S,T);
+
     if(!R.ok){
         resp.error_code=1;
-        resp.path_size=0; resp.path_length=-1;
-        snprintf(resp.message,sizeof(resp.message),"No path found");
+        resp.path_length=-1;
+        strcpy(resp.message,"No path found");
     } else {
-        resp.error_code=0;
-        resp.path_length = (int)R.dist;
-        resp.path_size = (int)R.path.size();
-        if(resp.path_size > (int)(sizeof(resp.path)/sizeof(resp.path[0]))){
-            // too large (safety)
-            snprintf(resp.message,sizeof(resp.message),"Path too long");
-            resp.error_code = 1;
-        } else {
-            for(size_t i=0;i<R.path.size();i++) resp.path[i]=R.path[i];
-            snprintf(resp.message,sizeof(resp.message),"OK");
-        }
+        resp.error_code = 0;
+        resp.path_length = R.dist;
+        resp.path_size   = R.path.size();
+        strcpy(resp.message, "OK");
+
+        for(int i=0;i<R.path.size() && i<64;i++)
+            resp.path[i] = R.path[i];
     }
-    send(client,&resp,sizeof(resp),0);
+
+    send(client, &resp, sizeof(resp), 0);
     close(client);
-    tcp_clients_count--;
+    tcp_clients--;
 }
 
-// ---------------- UDP handling with ACKs and concurrency limit ----------------
+/*==========================================================================
+ * UDP BUFFER (RELIABLE)
+ *==========================================================================*/
+
 struct Udbuf {
     sockaddr_in addr;
-    int n=-1,m=-1,S=-1,T=-1;
-    vector<vector<int>> rows; // rows by index
-    vector<int> weights;
+    int n=-1, m=-1, S=-1, T=-1;
     bool have_header=false;
     bool have_weights=false;
     int received_rows=0;
-    chrono::steady_clock::time_point last_seen;
+
+    vector<vector<int>> rows;
+    vector<int> weights;
 };
 
 mutex U_m;
 unordered_map<string, Udbuf> U;
 
-atomic<int> udp_tasks_count{0};
-const int UDP_TASKS_MAX = 3;
+/*==========================================================================
+ * UDP PROCESSOR
+ *==========================================================================*/
 
-void udp_process_and_reply(const string& cid, int udp_sock){
-    // limit concurrent processing
-    if(udp_tasks_count.fetch_add(1) >= UDP_TASKS_MAX){
-        udp_tasks_count--;
-        // queueing could be implemented; for now respond busy
-        // send SERVER_RESPONSE ERROR BUSY
+atomic<int> udp_tasks{0};
+const int UDP_LIMIT = 3;
+
+void udp_process(const string& cid, int udp){
+    if(udp_tasks.fetch_add(1) >= UDP_LIMIT){
+        udp_tasks--;
         return;
     }
 
@@ -193,163 +239,195 @@ void udp_process_and_reply(const string& cid, int udp_sock){
         U.erase(cid);
     }
 
-    // validate
     if(!buf.have_header || !buf.have_weights || buf.received_rows != buf.n){
-        // send error
-        string err = string(cid) + " ERROR Incomplete data";
-        sendto(udp_sock, err.c_str(), err.size(), 0, (sockaddr*)&buf.addr, sizeof(buf.addr));
-        udp_tasks_count--;
-        return;
-    }
-    int n = buf.n, m = buf.m, S = buf.S, T = buf.T;
-    if(!valid_nm(n,m) || S<0 || S>=n || T<0 || T>=n){
-        string err = string(cid) + " ERROR Bad params";
-        sendto(udp_sock, err.c_str(), err.size(), 0, (sockaddr*)&buf.addr, sizeof(buf.addr));
-        udp_tasks_count--;
+        string err = cid + " ERROR Incomplete data";
+        sendto(udp, err.c_str(), err.size(), 0, 
+               (sockaddr*)&buf.addr, sizeof(buf.addr));
+        udp_tasks--;
         return;
     }
 
-    // flatten
+    int n=buf.n, m=buf.m, S=buf.S, T=buf.T;
+
+    // Flatten
     vector<int> flat(n*m);
-    for(int i=0;i<n;i++) for(int j=0;j<m;j++) flat[i*m+j]=buf.rows[i][j];
+    for(int i=0;i<n;i++)
+        for(int j=0;j<m;j++)
+            flat[i*m+j] = buf.rows[i][j];
 
-    // validate columns
+    // Validate each column
     for(int e=0;e<m;e++){
-        int cnt=0; int pos=-1, neg=-1;
-        for(int v=0; v<n; v++){
+        int cnt=0,pos=-1,neg=-1;
+        for(int v=0;v<n;v++){
             int val = flat[v*m+e];
             if(val!=0){
                 cnt++;
-                if(val>0) pos=v; else neg=v;
+                if(val>0) pos=v;
+                else      neg=v;
             }
         }
         if(cnt!=2 || pos==-1 || neg==-1){
-            string err = string(cid) + " ERROR Invalid incidence col";
-            sendto(udp_sock, err.c_str(), err.size(), 0, (sockaddr*)&buf.addr, sizeof(buf.addr));
-            udp_tasks_count--;
+            string err = cid + " ERROR Invalid incidence col";
+            sendto(udp,err.c_str(),err.size(),0,
+                   (sockaddr*)&buf.addr,sizeof(buf.addr));
+            udp_tasks--;
             return;
         }
     }
 
     auto adj = build_adj(n,m,flat,buf.weights);
     auto R = dijkstra(n,adj,S,T);
+
     if(!R.ok){
-        // send error
-        string err = string(cid) + " ERROR No Path";
-        sendto(udp_sock, err.c_str(), err.size(), 0, (sockaddr*)&buf.addr, sizeof(buf.addr));
-        udp_tasks_count--;
+        string err = cid + " ERROR No Path";
+        sendto(udp,err.c_str(),err.size(),0,
+               (sockaddr*)&buf.addr,sizeof(buf.addr));
+        udp_tasks--;
         return;
     }
 
-    // build UDP_RESULT binary: header + dist + sz + nodes
+    // Build UDP_RESULT binary
     vector<uint8_t> out(sizeof(UdpPacketHeader) + 4 + 4 + 4*R.path.size());
-    UdpPacketHeader *h = (UdpPacketHeader*)out.data();
+    UdpPacketHeader* h = (UdpPacketHeader*)out.data();
     memcpy(h->cid, cid.c_str(), 9);
     h->type = UDP_RESULT;
-    uint8_t *p = out.data() + sizeof(UdpPacketHeader);
-    int32_t tmp = htonl((int32_t)R.dist); memcpy(p,&tmp,4); p+=4;
-    tmp = htonl((int32_t)R.path.size()); memcpy(p,&tmp,4); p+=4;
-    for(int v: R.path){ tmp = htonl(v); memcpy(p,&tmp,4); p+=4; }
-    sendto(udp_sock, out.data(), out.size(), 0, (sockaddr*)&buf.addr, sizeof(buf.addr));
 
-    udp_tasks_count--;
+    uint8_t* p = out.data() + sizeof(UdpPacketHeader);
+
+    auto put = [&](int32_t x){
+        int32_t y = htonl(x);
+        memcpy(p, &y, 4);
+        p += 4;
+    };
+
+    put((int32_t)R.dist);
+    put((int32_t)R.path.size());
+    for(int v : R.path) put(v);
+
+    sendto(udp, out.data(), out.size(), 0,
+           (sockaddr*)&buf.addr, sizeof(buf.addr));
+
+    udp_tasks--;
 }
 
+/*==========================================================================
+ * MAIN SERVER LOOP
+ *==========================================================================*/
+
 int main(int argc,char**argv){
-    if(argc!=2){ cout<<"Usage: ./server <port>\n"; return 0;}
-    int PORT=atoi(argv[1]);
+    if(argc!=2){
+        cout<<"Usage: ./server <port>\n";
+        return 0;
+    }
 
-    int tcp_sock = socket(AF_INET,SOCK_STREAM,0);
-    int udp_sock = socket(AF_INET,SOCK_DGRAM,0);
-    if(tcp_sock<0||udp_sock<0){ perror("socket"); return 1; }
+    int PORT = atoi(argv[1]);
 
-    sockaddr_in a{}; a.sin_family=AF_INET; a.sin_port=htons(PORT); a.sin_addr.s_addr=INADDR_ANY;
-    bind(tcp_sock,(sockaddr*)&a,sizeof(a));
-    bind(udp_sock,(sockaddr*)&a,sizeof(a));
-    listen(tcp_sock,10);
-    cout<<"SERVER active on port "<<PORT<<" (TCP+UDP)\n";
+    int tcp = socket(AF_INET,SOCK_STREAM,0);
+    int udp = socket(AF_INET,SOCK_DGRAM,0);
 
-    // TCP accept loop in a thread
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(PORT);
+    a.sin_addr.s_addr = INADDR_ANY;
+
+    bind(tcp,(sockaddr*)&a,sizeof(a));
+    listen(tcp,10);
+
+    bind(udp,(sockaddr*)&a,sizeof(a));
+
+    cout<<"Server running on port "<<PORT<<" (TCP + UDP)\n";
+
+    // TCP accept loop
     thread([&](){
         while(true){
-            sockaddr_in c; socklen_t L=sizeof(c);
-            int cl = accept(tcp_sock,(sockaddr*)&c,&L);
-            if(cl<0) continue;
-            thread(handle_tcp, cl).detach();
+            sockaddr_in c;
+            socklen_t L=sizeof(c);
+            int cl = accept(tcp,(sockaddr*)&c,&L);
+            if(cl>=0){
+                thread(handle_tcp, cl).detach();
+            }
         }
     }).detach();
 
-    // UDP main loop
+    // UDP loop
     while(true){
-        uint8_t buf[4096];
-        sockaddr_in c; socklen_t L=sizeof(c);
-        ssize_t r = recvfrom(udp_sock, buf, sizeof(buf)-1, 0, (sockaddr*)&c, &L);
-        if(r<=0) continue;
+        uint8_t buf_raw[4096];
+        sockaddr_in from; socklen_t L=sizeof(from);
+        ssize_t r = recvfrom(udp, buf_raw, sizeof(buf_raw), 0,
+                             (sockaddr*)&from, &L);
+
         if(r < (ssize_t)sizeof(UdpPacketHeader)) continue;
-        UdpPacketHeader *h = (UdpPacketHeader*)buf;
+
+        UdpPacketHeader *h = (UdpPacketHeader*)buf_raw;
         string cid(h->cid, 8);
 
         lock_guard<mutex> lk(U_m);
-        auto &Ue = U[cid];
-        Ue.addr = c;
-        Ue.last_seen = chrono::steady_clock::now();
+        auto &B = U[cid];
+        B.addr = from;
 
         if(h->type == UDP_HEADER){
-            if(r < (ssize_t)(sizeof(UdpPacketHeader)+4*4)) continue;
-            uint8_t *p = buf + sizeof(UdpPacketHeader);
+            uint8_t* p = buf_raw + sizeof(UdpPacketHeader);
             int32_t n = ntohl(*(int32_t*)p); p+=4;
             int32_t m = ntohl(*(int32_t*)p); p+=4;
             int32_t S = ntohl(*(int32_t*)p); p+=4;
             int32_t T = ntohl(*(int32_t*)p); p+=4;
-            Ue.n = n; Ue.m = m; Ue.S = S; Ue.T = T;
-            if(valid_nm(n,m)){
-                Ue.rows.assign(n, vector<int>(m,0));
-                Ue.weights.assign(m,0);
-                Ue.have_header = true;
-            } else {
-                // invalid header -> send immediate error
-                string err = cid + string(" ERROR Bad header");
-                sendto(udp_sock, err.c_str(), err.size(), 0, (sockaddr*)&c, sizeof(c));
+
+            if(!valid_nm(n,m)){
+                string err = cid + " ERROR Invalid n/m";
+                sendto(udp, err.c_str(), err.size(), 0,
+                       (sockaddr*)&from, sizeof(from));
+                continue;
             }
-        } else if(h->type == UDP_ROW){
-            if(!Ue.have_header) continue;
-            if(r < (ssize_t)(sizeof(UdpPacketHeader)+4 + 4*Ue.m)) continue;
-            uint8_t *p = buf + sizeof(UdpPacketHeader);
+
+            B.n = n; B.m = m; B.S = S; B.T = T;
+            B.rows.assign(n, vector<int>(m, 0));
+            B.weights.assign(m, 0);
+            B.have_header = true;
+        }
+
+        else if(h->type == UDP_ROW){
+            if(!B.have_header) continue;
+            uint8_t* p = buf_raw + sizeof(UdpPacketHeader);
             int32_t row = ntohl(*(int32_t*)p); p+=4;
-            if(row < 0 || row >= Ue.n) continue;
-            for(int j=0;j<Ue.m;j++){
+
+            if(row < 0 || row >= B.n) continue;
+
+            for(int j=0;j<B.m;j++){
                 int32_t val = ntohl(*(int32_t*)p); p+=4;
-                Ue.rows[row][j] = val;
+                B.rows[row][j] = val;
             }
-            Ue.received_rows++;
-        } else if(h->type == UDP_WEIGHTS){
-            if(!Ue.have_header) continue;
-            if(r < (ssize_t)(sizeof(UdpPacketHeader)+4 + 4*Ue.m)) continue;
-            uint8_t *p = buf + sizeof(UdpPacketHeader);
-            int32_t m_read = ntohl(*(int32_t*)p); p+=4;
-            if(m_read != Ue.m) continue;
-            for(int j=0;j<Ue.m;j++){
+            B.received_rows++;
+        }
+
+        else if(h->type == UDP_WEIGHTS){
+            if(!B.have_header) continue;
+            uint8_t* p = buf_raw + sizeof(UdpPacketHeader);
+            int32_t m2 = ntohl(*(int32_t*)p); p+=4;
+
+            if(m2 != B.m) continue;
+
+            for(int j=0;j<B.m;j++){
                 int32_t w = ntohl(*(int32_t*)p); p+=4;
-                Ue.weights[j] = w;
+                B.weights[j] = w;
             }
-            Ue.have_weights = true;
-        } else if(h->type == UDP_FIN){
-            // send ACK immediately
+            B.have_weights = true;
+        }
+
+        else if(h->type == UDP_FIN){
+            // SEND ACK IMMEDIATELY
             vector<uint8_t> ack(sizeof(UdpPacketHeader));
             UdpPacketHeader *ah = (UdpPacketHeader*)ack.data();
             memcpy(ah->cid, h->cid, 9);
             ah->type = UDP_ACK;
-            sendto(udp_sock, ack.data(), ack.size(), 0, (sockaddr*)&c, sizeof(c));
 
-            // spawn processing thread
-            string cid_s = cid;
-            thread([cid_s, udp_sock](){
-                udp_process_and_reply(cid_s, udp_sock);
-            }).detach();
+            sendto(udp, ack.data(), ack.size(), 0,
+                   (sockaddr*)&from, sizeof(from));
+
+            // Process in thread
+            string cid_copy = cid;
+            thread([cid_copy, udp](){ udp_process(cid_copy, udp); }).detach();
         }
     }
 
-    close(tcp_sock);
-    close(udp_sock);
     return 0;
 }
