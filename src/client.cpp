@@ -417,65 +417,81 @@ bool send_graph_to_server_udp(
 
     /* -------- retry loop (ACK) -------- */
 
-    bool acked = false;
-    int attempts = 0;
-    const int MAX_ATTEMPTS = 3;
+   /* -------- retry loop (ACK) -------- */
 
-    uint8_t recvbuf[4096];
+bool acked = false;
+int attempts = 0;
+const int MAX_ATTEMPTS = 3;
 
-    while(attempts < MAX_ATTEMPTS && !acked){
-        attempts++;
-        send_sequence();
+// 1. ENVOYER LA SÉQUENCE COMPLÈTE UNE SEULE FOIS
+cout << "UDP: Sending complete sequence...\n";
+send_header(sock);
+for(int i=0;i<n;i++) send_row(sock,i);
+send_weights(sock);
+send_fin(sock);  // Premier FIN
 
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(sock,&fds);
-        struct timeval tv; tv.tv_sec=3; tv.tv_usec=0;
+// 2. BOUCLE POUR ATTENDRE ACK (avec retransmission du FIN seulement)
+while(attempts < MAX_ATTEMPTS && !acked){
+    attempts++;
+    
+    if(attempts > 1){
+        cout << "UDP: Retransmitting FIN (attempt " << attempts << "/3)\n";
+        // Réenvoyer SEULEMENT le FIN, pas toute la séquence
+        vector<uint8_t> fin_buf(sizeof(UdpPacketHeader));
+        UdpPacketHeader* fin_h = (UdpPacketHeader*)fin_buf.data();
+        memcpy(fin_h->cid, cid, 9);
+        fin_h->type = UDP_FIN;
+        sendto(sock, fin_buf.data(), fin_buf.size(), 0,
+              (sockaddr*)&srv, sizeof(srv));
+    }
 
-        int rv = select(sock+1, &fds, nullptr, nullptr, &tv);
-        if(rv>0 && FD_ISSET(sock,&fds)){
-            sockaddr_in from; socklen_t L=sizeof(from);
-            ssize_t r = recvfrom(sock, recvbuf, sizeof(recvbuf), 0,
-                                 (sockaddr*)&from, &L);
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(sock,&fds);
+    struct timeval tv; tv.tv_sec=3; tv.tv_usec=0;
 
-            if(r >= (ssize_t)sizeof(UdpPacketHeader)){
-                UdpPacketHeader* h=(UdpPacketHeader*)recvbuf;
+    int rv = select(sock+1, &fds, nullptr, nullptr, &tv);
+    
+    if(rv>0 && FD_ISSET(sock,&fds)){
+        sockaddr_in from; socklen_t L=sizeof(from);
+        ssize_t r = recvfrom(sock, recvbuf, sizeof(recvbuf), 0,
+                            (sockaddr*)&from, &L);
 
-                if(strncmp(h->cid,cid,8)==0){
-                    if(h->type == UDP_ACK){
-                        acked = true;
-                        break;
+        if(r >= (ssize_t)sizeof(UdpPacketHeader)){
+            UdpPacketHeader* h=(UdpPacketHeader*)recvbuf;
+
+            if(strncmp(h->cid,cid,8)==0){
+                if(h->type == UDP_ACK){
+                    acked = true;
+                    cout << "UDP: ACK received!\n";
+                    break;
+                }
+                else if(h->type == UDP_RESULT){
+                    // Traiter résultat directement
+                    uint8_t* p = recvbuf+sizeof(UdpPacketHeader);
+                    auto get = [&](int32_t& x){
+                        x = ntohl(*(int32_t*)p); p+=4;
+                    };
+                    int32_t dist, sz;
+                    get(dist); get(sz);
+
+                    cout<<"\n=== RESULT (UDP) ===\nPath length: "<<dist<<"\nPath: ";
+                    for(int i=0;i<sz;i++){
+                        int32_t node; get(node);
+                        cout<<node<<(i+1<sz?"->":"");
                     }
-                    else if(h->type == UDP_RESULT){
-                        // server sent result directly
-                        uint8_t* p = recvbuf+sizeof(UdpPacketHeader);
-                        auto get = [&](int32_t& x){
-                            x = ntohl(*(int32_t*)p); p+=4;
-                        };
-                        int32_t dist, sz;
-                        get(dist); get(sz);
-
-                        cout<<"\n=== RESULT (UDP) ===\nPath length: "<<dist<<"\nPath: ";
-                        for(int i=0;i<sz;i++){
-                            int32_t node; get(node);
-                            cout<<node<<(i+1<sz?"->":"");
-                        }
-                        cout<<"\n";
-                        close(sock);
-                        return true;
-                    }
+                    cout<<"\n";
+                    close(sock);
+                    return true;
                 }
             }
         }
-        // else timeout → retry
     }
-
-    if(!acked){
-        cout<<"Perte de connexion (UDP) après "<<attempts<<" tentatives.\n";
-        close(sock);
-        return false;
+    else if(rv == 0){
+        cout << "UDP: Timeout after 3 seconds\n";
+        // Continue la boucle pour retry
     }
-
+}
     /* -------- ACK received → wait for server result -------- */
 
     fd_set fds;
