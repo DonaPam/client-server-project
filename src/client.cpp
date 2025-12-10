@@ -1,355 +1,306 @@
+// client.cpp - Version corrigée
 // Compile: g++ client.cpp -o client -std=c++17
+
 #include <bits/stdc++.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
-#include <getopt.h>
-#include <poll.h>
 #include <fcntl.h>
+#include <poll.h>
 #include "protocol.h"
 using namespace std;
 
-// ---- Variables globales ----
-atomic<bool> exit_requested{false};
-
-// ---- Prototypes ----
-void show_usage(const char* prog);
-bool parse_arguments(int argc, char* argv[], string& ip, int& proto, int& port);
-bool get_graph_data(int& n, int& m, int& s, int& t, 
-                    vector<vector<int8_t>>& inc, vector<int16_t>& weights);
-bool send_tcp(const string& ip, int port, int n, int m, int s, int t,
-              const vector<vector<int8_t>>& inc, const vector<int16_t>& weights);
-bool send_udp_reliable(const string& ip, int port, int n, int m, int s, int t,
-                       const vector<vector<int8_t>>& inc, const vector<int16_t>& weights);
-
-// ---- Split ----
-vector<string> split_ws(const string& s) {
-    vector<string> out;
-    string token;
+// ==================== FONCTIONS UTILITAIRES ====================
+vector<string> split_ws(const string &s) {
+    vector<string> out; 
+    string t;
     for (char c : s) {
-        if (isspace((unsigned char)c)) {
-            if (!token.empty()) {
-                out.push_back(token);
-                token.clear();
-            }
+        if (isspace((unsigned char)c)) { 
+            if (!t.empty()) { 
+                out.push_back(t); 
+                t.clear(); 
+            } 
         } else {
-            token += c;
+            t.push_back(c);
         }
     }
-    if (!token.empty()) out.push_back(token);
+    if (!t.empty()) out.push_back(t);
     return out;
 }
 
-// ---- Validation des données ----
-bool validate_graph_input(int n, int m, int s, int t, 
-                         const vector<vector<int8_t>>& inc) {
-    if (n < 6 || n >= 20) {
-        cerr << "Error: n must be in [6, 19]\n";
-        return false;
+string gen_client_id() {
+    static mt19937_64 rng(chrono::high_resolution_clock::now().time_since_epoch().count());
+    uint64_t v = rng();
+    string s(16, '0');
+    for (int i = 0; i < 16; i++) {
+        s[i] = "0123456789ABCDEF"[v & 15];
+        v >>= 4;
     }
-    if (m < 6 || m >= 20) {
-        cerr << "Error: m must be in [6, 19]\n";
-        return false;
-    }
-    if (s < 0 || s >= n) {
-        cerr << "Error: start node must be in [0, " << n-1 << "]\n";
-        return false;
-    }
-    if (t < 0 || t >= n) {
-        cerr << "Error: end node must be in [0, " << n-1 << "]\n";
-        return false;
-    }
-    
-    // Vérifier matrice d'incidence
-    for (int e = 0; e < m; e++) {
-        int endpoints = 0;
-        for (int v = 0; v < n; v++) {
-            if (inc[v][e] != 0) endpoints++;
-        }
-        if (endpoints != 2) {
-            cerr << "Error: edge " << e << " has " << endpoints << " endpoints (expected 2)\n";
-            return false;
-        }
-    }
-    
-    return true;
+    return s;
 }
 
-// ---- Génération ID de session ----
-string generate_session_id() {
-    static mt19937_64 rng(chrono::steady_clock::now().time_since_epoch().count());
-    uint64_t id = rng();
-    stringstream ss;
-    ss << hex << setw(16) << setfill('0') << id;
-    return ss.str();
-}
-
-// ---- Affichage usage ----
-void show_usage(const char* prog) {
-    cout << "Usage:\n";
-    cout << "  " << prog << " --ip <IP> --port <PORT> --protocol <TCP|UDP> [options]\n";
-    cout << "  " << prog << " (interactive mode)\n\n";
-    cout << "Options:\n";
-    cout << "  --ip, -i          Server IP address (default: 127.0.0.1)\n";
-    cout << "  --port, -p        Server port (required)\n";
-    cout << "  --protocol, -P    Protocol: TCP or UDP (required)\n";
-    cout << "  --file, -f        Input file (optional)\n";
-    cout << "  --help, -h        Show this help\n\n";
-    cout << "Examples:\n";
-    cout << "  " << prog << " --ip 127.0.0.1 --port 1234 --protocol TCP\n";
-    cout << "  " << prog << " --ip 192.168.1.100 --port 8080 --protocol UDP --file graph.txt\n";
-    cout << "  " << prog << " (for interactive mode)\n";
-}
-
-// ---- Parsing arguments ----
-bool parse_arguments(int argc, char* argv[], 
-                     string& ip, int& proto, int& port, string& filename) {
+// ==================== UDP FIABLE ====================
+class ReliableUDP {
+private:
+    int sock;
+    sockaddr_in server_addr;
+    string client_id;
+    uint16_t seq_num;
     
-    static struct option long_options[] = {
-        {"ip", required_argument, 0, 'i'},
-        {"port", required_argument, 0, 'p'},
-        {"protocol", required_argument, 0, 'P'},
-        {"file", required_argument, 0, 'f'},
-        {"help", no_argument, 0, 'h'},
-        {0, 0, 0, 0}
-    };
-    
-    ip = "127.0.0.1";
-    proto = 0;
-    port = 0;
-    filename = "";
-    
-    int opt;
-    int option_index = 0;
-    
-    while ((opt = getopt_long(argc, argv, "i:p:P:f:h", 
-                              long_options, &option_index)) != -1) {
-        switch (opt) {
-            case 'i':
-                ip = optarg;
-                break;
-            case 'p':
-                try {
-                    port = stoi(optarg);
-                    if (port < 1 || port > 65535) {
-                        cerr << "Error: Port must be 1-65535\n";
-                        return false;
+    bool send_with_ack(const UdpDataPacket& packet, size_t data_size) {
+        const int MAX_RETRIES = 3;
+        const int TIMEOUT_MS = 3000;
+        
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            // Envoi du paquet
+            sendto(sock, &packet, sizeof(UdpHeader) + data_size, 0,
+                   (sockaddr*)&server_addr, sizeof(server_addr));
+            
+            // Attente ACK avec timeout
+            struct pollfd pfd;
+            pfd.fd = sock;
+            pfd.events = POLLIN;
+            
+            int ret = poll(&pfd, 1, TIMEOUT_MS);
+            
+            if (ret > 0) {
+                // Données reçues, vérifier si c'est un ACK
+                UdpDataPacket ack_packet;
+                sockaddr_in from;
+                socklen_t from_len = sizeof(from);
+                
+                ssize_t bytes = recvfrom(sock, &ack_packet, sizeof(ack_packet), 0,
+                                         (sockaddr*)&from, &from_len);
+                
+                if (bytes >= sizeof(UdpHeader)) {
+                    // Vérifier que c'est bien notre serveur
+                    if (from.sin_addr.s_addr == server_addr.sin_addr.s_addr &&
+                        from.sin_port == server_addr.sin_port &&
+                        ack_packet.header.packet_type == UDP_ACK &&
+                        memcmp(ack_packet.header.client_id, client_id.c_str(), 16) == 0) {
+                        return true; // ACK reçu
                     }
-                } catch (...) {
-                    cerr << "Error: Invalid port\n";
-                    return false;
                 }
-                break;
-            case 'P': {
-                string proto_str = optarg;
-                transform(proto_str.begin(), proto_str.end(), proto_str.begin(), ::toupper);
-                if (proto_str == "TCP") proto = 1;
-                else if (proto_str == "UDP") proto = 2;
-                else {
-                    cerr << "Error: Protocol must be TCP or UDP\n";
-                    return false;
-                }
-                break;
+            } else if (ret == 0) {
+                // Timeout
+                cerr << "Timeout, tentative " << (attempt + 1) << "/3..." << endl;
             }
-            case 'f':
-                filename = optarg;
-                break;
-            case 'h':
-                show_usage(argv[0]);
-                exit(0);
-            default:
-                return false;
         }
-    }
-    
-    if (port == 0 || proto == 0) {
+        
+        // Échec après 3 tentatives
+        cerr << "ERREUR: Perte de connexion avec le serveur après 3 tentatives" << endl;
         return false;
     }
     
-    return true;
-}
-
-// ---- Lecture données graphe ----
-bool get_graph_data(int& n, int& m, int& s, int& t,
-                    vector<vector<int8_t>>& inc, vector<int16_t>& weights,
-                    const string& filename = "") {
+public:
+    ReliableUDP(int socket, const sockaddr_in& addr, const string& id) 
+        : sock(socket), server_addr(addr), client_id(id), seq_num(0) {}
     
-    if (!filename.empty()) {
-        // Lecture depuis fichier
-        ifstream fin(filename);
-        if (!fin) {
-            cerr << "Error: Cannot open file " << filename << "\n";
+    bool send_data(const void* data, size_t size, uint16_t packet_type) {
+        UdpDataPacket packet;
+        
+        // Remplir header
+        memcpy(packet.header.client_id, client_id.c_str(), 16);
+        packet.header.packet_type = packet_type;
+        packet.header.seq_num = seq_num++;
+        packet.header.total_packets = 1;
+        packet.header.current_packet = 0;
+        
+        // Copier données
+        size_t to_copy = min(size, sizeof(packet.data));
+        memcpy(packet.data, data, to_copy);
+        
+        return send_with_ack(packet, to_copy);
+    }
+    
+    bool send_graph_data(int n, int m, int s, int t, 
+                        const vector<int>& mat, const vector<int>& weights) {
+        // 1. Envoyer HEADER
+        string header_data = to_string(n) + " " + to_string(m) + " " + 
+                            to_string(s) + " " + to_string(t);
+        
+        if (!send_data(header_data.c_str(), header_data.size() + 1, UDP_HEADER)) {
             return false;
         }
         
-        fin >> n >> m >> s >> t;
-        inc.assign(n, vector<int8_t>(m, 0));
-        weights.assign(m, 1);
+        // 2. Envoyer matrice d'incidence par lignes
+        for (int i = 0; i < n; i++) {
+            string row_data;
+            for (int e = 0; e < m; e++) {
+                row_data += to_string(mat[i * m + e]) + " ";
+            }
+            
+            if (!send_data(row_data.c_str(), row_data.size() + 1, UDP_DATA)) {
+                return false;
+            }
+        }
+        
+        // 3. Envoyer poids
+        string weights_data;
+        for (int w : weights) {
+            weights_data += to_string(w) + " ";
+        }
+        
+        if (!send_data(weights_data.c_str(), weights_data.size() + 1, UDP_WEIGHTS)) {
+            return false;
+        }
+        
+        // 4. Envoyer FIN
+        if (!send_data("", 1, UDP_FIN)) {
+            return false;
+        }
+        
+        return true;
+    }
+};
+
+// ==================== ENTRÉE DONNÉES ====================
+bool get_graph_data(int& n, int& m, int& s, int& t, 
+                   vector<int>& mat, vector<int>& weights) {
+    cout << "=== Source des données ===\n";
+    cout << "1 = Saisie manuelle\n";
+    cout << "2 = Lecture depuis fichier\n";
+    cout << "3 = Quitter\n";
+    cout << "Choix: ";
+    
+    string input;
+    cin >> input;
+    
+    if (input == "exit" || input == "3") {
+        cout << "Au revoir!\n";
+        return false;
+    }
+    
+    int mode;
+    try {
+        mode = stoi(input);
+    } catch (...) {
+        cerr << "Entrée invalide\n";
+        return false;
+    }
+    
+    if (mode == 2) {
+        // Lecture fichier
+        string filename;
+        cout << "Nom du fichier: ";
+        cin >> filename;
+        
+        if (filename == "exit") return false;
+        
+        ifstream fin(filename);
+        if (!fin) {
+            cerr << "Impossible d'ouvrir le fichier\n";
+            return false;
+        }
+        
+        fin >> n >> m;
+        fin >> s >> t;
+        
+        // Validation selon OДЗ
+        if (n < MIN_VERTICES || n > MAX_VERTICES || 
+            m < MIN_VERTICES || m > MAX_EDGES) {
+            cerr << "ERREUR: n doit être entre " << MIN_VERTICES 
+                 << " et " << MAX_VERTICES 
+                 << ", m entre " << MIN_VERTICES 
+                 << " et " << MAX_EDGES << endl;
+            return false;
+        }
+        
+        mat.assign(n * m, 0);
+        weights.assign(m, 0);
         
         for (int e = 0; e < m; e++) {
             int u, v, w;
             if (!(fin >> u >> v >> w)) {
-                cerr << "Error: Invalid file format\n";
+                cerr << "Format de fichier invalide\n";
                 return false;
             }
             
-            // Validation indices
-            if (u < 0 || u >= n || v < 0 || v >= n) {
-                cerr << "Error: Invalid vertex indices in edge " << e << "\n";
+            // Validation poids (non-négatifs pour 3ème année)
+            if (w < 0) {
+                cerr << "ERREUR: Les poids doivent être non-négatifs\n";
                 return false;
             }
             
-            inc[u][e] = 1;
-            inc[v][e] = -1;
-            weights[e] = abs(w);
+            // Matrice d'incidence signée
+            mat[u * m + e] = w;
+            mat[v * m + e] = -w;
+            weights[e] = w;
         }
         
-        fin.close();
-        cout << "✓ Graph loaded from file\n";
-        return validate_graph_input(n, m, s, t, inc);
-    }
-    
-    // Mode interactif
-    cout << "\n=== Graph Input ===\n";
-    cout << "Type 'exit' at any time to quit\n\n";
-    
-    // Nombre de sommets
-    while (true) {
-        cout << "Number of vertices (6-19): ";
-        string input;
-        getline(cin, input);
+        cout << "✓ Fichier lu avec succès\n";
         
-        if (input == "exit") {
-            exit_requested = true;
+    } else if (mode == 1) {
+        // Saisie manuelle
+        cout << "Nombre de sommets (" << MIN_VERTICES << "-" << MAX_VERTICES << "): ";
+        cin >> input;
+        if (input == "exit") return false;
+        n = stoi(input);
+        
+        cout << "Nombre d'arêtes (" << MIN_VERTICES << "-" << MAX_EDGES << "): ";
+        cin >> input;
+        if (input == "exit") return false;
+        m = stoi(input);
+        
+        // Validation OДЗ
+        if (n < MIN_VERTICES || n > MAX_VERTICES || 
+            m < MIN_VERTICES || m > MAX_EDGES) {
+            cerr << "ERREUR: Valeurs hors limites\n";
             return false;
         }
         
-        try {
-            n = stoi(input);
-            if (n >= 6 && n < 20) break;
-            cout << "Error: Must be between 6 and 19\n";
-        } catch (...) {
-            cout << "Error: Invalid number\n";
-        }
-    }
-    
-    // Nombre d'arêtes
-    while (true) {
-        cout << "Number of edges (6-19): ";
-        string input;
-        getline(cin, input);
+        cout << "Sommet de départ (0-" << n-1 << "): ";
+        cin >> input;
+        if (input == "exit") return false;
+        s = stoi(input);
         
-        if (input == "exit") {
-            exit_requested = true;
-            return false;
-        }
+        cout << "Sommet d'arrivée (0-" << n-1 << "): ";
+        cin >> input;
+        if (input == "exit") return false;
+        t = stoi(input);
         
-        try {
-            m = stoi(input);
-            if (m >= 6 && m < 20) break;
-            cout << "Error: Must be between 6 and 19\n";
-        } catch (...) {
-            cout << "Error: Invalid number\n";
-        }
-    }
-    
-    // Sommets de départ et d'arrivée
-    while (true) {
-        cout << "Start vertex (0-" << n-1 << "): ";
-        string input;
-        getline(cin, input);
+        mat.assign(n * m, 0);
+        weights.assign(m, 0);
         
-        if (input == "exit") {
-            exit_requested = true;
-            return false;
-        }
-        
-        try {
-            s = stoi(input);
-            if (s >= 0 && s < n) break;
-            cout << "Error: Must be between 0 and " << n-1 << "\n";
-        } catch (...) {
-            cout << "Error: Invalid number\n";
-        }
-    }
-    
-    while (true) {
-        cout << "End vertex (0-" << n-1 << "): ";
-        string input;
-        getline(cin, input);
-        
-        if (input == "exit") {
-            exit_requested = true;
-            return false;
-        }
-        
-        try {
-            t = stoi(input);
-            if (t >= 0 && t < n) break;
-            cout << "Error: Must be between 0 and " << n-1 << "\n";
-        } catch (...) {
-            cout << "Error: Invalid number\n";
-        }
-    }
-    
-    // Initialiser matrices
-    inc.assign(n, vector<int8_t>(m, 0));
-    weights.assign(m, 1);
-    
-    // Entrer les arêtes
-    cout << "\nEnter " << m << " edges (format: u v weight):\n";
-    for (int e = 0; e < m; e++) {
-        while (true) {
-            cout << "Edge " << e << ": ";
-            string line;
-            getline(cin, line);
+        cout << "\nSaisie des " << m << " arêtes (format: u v poids):\n";
+        for (int e = 0; e < m; e++) {
+            cout << "Arête " << e << ": ";
+            string u_str, v_str, w_str;
+            cin >> u_str;
+            if (u_str == "exit") return false;
+            cin >> v_str;
+            if (v_str == "exit") return false;
+            cin >> w_str;
+            if (w_str == "exit") return false;
             
-            if (line == "exit") {
-                exit_requested = true;
+            int u = stoi(u_str);
+            int v = stoi(v_str);
+            int w = stoi(w_str);
+            
+            // Validation poids non-négatifs
+            if (w < 0) {
+                cerr << "ERREUR: Poids non-négatifs seulement\n";
                 return false;
             }
             
-            vector<string> tokens = split_ws(line);
-            if (tokens.size() != 3) {
-                cout << "Error: Need 3 numbers (u v weight)\n";
-                continue;
-            }
-            
-            try {
-                int u = stoi(tokens[0]);
-                int v = stoi(tokens[1]);
-                int w = stoi(tokens[2]);
-                
-                if (u < 0 || u >= n || v < 0 || v >= n) {
-                    cout << "Error: Vertex indices out of range\n";
-                    continue;
-                }
-                
-                if (u == v) {
-                    cout << "Error: Self-loops not allowed\n";
-                    continue;
-                }
-                
-                inc[u][e] = 1;
-                inc[v][e] = -1;
-                weights[e] = abs(w);
-                break;
-                
-            } catch (...) {
-                cout << "Error: Invalid numbers\n";
-            }
+            // Matrice d'incidence
+            mat[u * m + e] = w;
+            mat[v * m + e] = -w;
+            weights[e] = w;
         }
+    } else {
+        cerr << "Choix invalide\n";
+        return false;
     }
     
-    return validate_graph_input(n, m, s, t, inc);
+    return true;
 }
 
-// ---- Communication TCP ----
-bool send_tcp(const string& ip, int port, int n, int m, int s, int t,
-              const vector<vector<int8_t>>& inc, const vector<int16_t>& weights) {
-    
-    cout << "Connecting to " << ip << ":" << port << " via TCP...\n";
+// ==================== COMMUNICATION ====================
+bool send_tcp(const string& server_ip, int port,
+             int n, int m, int s, int t,
+             const vector<int>& mat, const vector<int>& weights) {
     
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -357,38 +308,31 @@ bool send_tcp(const string& ip, int port, int n, int m, int s, int t,
         return false;
     }
     
-    // Timeout
-    struct timeval tv{};
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    sockaddr_in srv{};
+    srv.sin_family = AF_INET;
+    srv.sin_port = htons(port);
+    inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr);
     
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
+    // Timeout de connexion
+    struct timeval timeout;
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     
-    if (inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr) <= 0) {
-        cerr << "Error: Invalid IP address\n";
-        close(sock);
-        return false;
-    }
-    
-    if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+    if (connect(sock, (sockaddr*)&srv, sizeof(srv)) < 0) {
         perror("connect");
         close(sock);
         return false;
     }
     
-    cout << "✓ Connected\n";
-    
     // Préparer requête
-    GraphRequest req{};
+    GraphRequest req;
     req.vertices = n;
     req.edges = m;
     req.start_node = s;
     req.end_node = t;
-    req.weighted = 1;
+    req.protocol = 1; // TCP
     
     // Envoyer requête
     if (send(sock, &req, sizeof(req), 0) != sizeof(req)) {
@@ -397,407 +341,242 @@ bool send_tcp(const string& ip, int port, int n, int m, int s, int t,
         return false;
     }
     
-    // Envoyer matrice d'incidence (aplatie)
-    vector<int8_t> flat_inc(n * m);
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            flat_inc[i * m + j] = inc[i][j];
-        }
-    }
-    
-    if (send(sock, flat_inc.data(), flat_inc.size() * sizeof(int8_t), 0) != 
-        (ssize_t)(flat_inc.size() * sizeof(int8_t))) {
+    // Envoyer matrice
+    if (send(sock, mat.data(), mat.size() * sizeof(int), 0) 
+        != (ssize_t)(mat.size() * sizeof(int))) {
         perror("send matrix");
         close(sock);
         return false;
     }
     
     // Envoyer poids
-    if (send(sock, weights.data(), weights.size() * sizeof(int16_t), 0) !=
-        (ssize_t)(weights.size() * sizeof(int16_t))) {
+    if (send(sock, weights.data(), weights.size() * sizeof(int), 0)
+        != (ssize_t)(weights.size() * sizeof(int))) {
         perror("send weights");
         close(sock);
         return false;
     }
     
-    cout << "✓ Graph data sent\n";
-    
     // Recevoir réponse
-    GraphResponse resp{};
+    GraphResponse resp;
     ssize_t bytes = recv(sock, &resp, sizeof(resp), MSG_WAITALL);
     
-    if (bytes != sizeof(resp)) {
-        cerr << "Error: Incomplete response from server\n";
-        close(sock);
-        return false;
-    }
-    
-    // Afficher résultat
-    cout << "\n=== RESULT (TCP) ===\n";
-    if (resp.error_code == 0) {
-        cout << "Path length: " << resp.path_length << "\n";
-        cout << "Path: ";
-        for (int i = 0; i < resp.path_size; i++) {
-            cout << resp.path[i];
-            if (i < resp.path_size - 1) cout << " -> ";
+    if (bytes == sizeof(resp)) {
+        cout << "\n=== RÉSULTAT (TCP) ===" << endl;
+        if (resp.error_code == 0) {
+            cout << "Longueur du chemin: " << resp.path_length << endl;
+            cout << "Chemin: ";
+            for (int i = 0; i < resp.path_size; i++) {
+                cout << resp.path[i];
+                if (i < resp.path_size - 1) cout << " → ";
+            }
+            cout << endl;
+        } else {
+            cout << "ERREUR: " << resp.message << endl;
         }
-        cout << "\n";
     } else {
-        cout << "Error: " << resp.message << "\n";
+        cerr << "Réponse incomplète du serveur" << endl;
     }
     
     close(sock);
     return true;
 }
 
-// ---- Communication UDP fiable ----
-bool send_udp_reliable(const string& ip, int port, int n, int m, int s, int t,
-                       const vector<vector<int8_t>>& inc, const vector<int16_t>& weights) {
-    
-    cout << "Connecting to " << ip << ":" << port << " via UDP (reliable)...\n";
+bool send_udp(const string& server_ip, int port,
+             int n, int m, int s, int t,
+             const vector<int>& mat, const vector<int>& weights) {
     
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
-        perror("socket");
+        perror("socket UDP");
         return false;
     }
     
-    // Timeout pour recvfrom
-    struct timeval tv{};
-    tv.tv_sec = 3;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // Socket non-bloquant pour timeout
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
+    sockaddr_in srv{};
+    srv.sin_family = AF_INET;
+    srv.sin_port = htons(port);
+    inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr);
     
-    if (inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr) <= 0) {
-        cerr << "Error: Invalid IP address\n";
+    string client_id = gen_client_id();
+    ReliableUDP rudp(sock, srv, client_id);
+    
+    cout << "Connexion UDP fiable établie (ID: " << client_id << ")" << endl;
+    
+    // Envoyer données avec mécanisme fiable
+    if (!rudp.send_graph_data(n, m, s, t, mat, weights)) {
+        cerr << "Échec de l'envoi des données" << endl;
         close(sock);
         return false;
     }
     
-    // Générer session ID
-    string session_id_str = generate_session_id();
-    uint32_t session_id = hash<string>{}(session_id_str);
+    // Attendre réponse finale
+    UdpDataPacket response;
+    sockaddr_in from;
+    socklen_t from_len = sizeof(from);
     
-    // Préparer données
-    GraphDataUdp graph_data{};
-    graph_data.vertices = n;
-    graph_data.edges = m;
-    graph_data.start_node = s;
-    graph_data.end_node = t;
+    struct pollfd pfd;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
     
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < m; j++) {
-            graph_data.inc_matrix[i][j] = inc[i][j];
-        }
-    }
+    int ret = poll(&pfd, 1, 10000); // 10 secondes timeout
     
-    for (int j = 0; j < m; j++) {
-        graph_data.weights[j] = weights[j];
-    }
-    
-    // Diviser en chunks
-    const size_t chunk_size = 1024;
-    const uint8_t* data_ptr = reinterpret_cast<uint8_t*>(&graph_data);
-    size_t total_size = sizeof(GraphDataUdp);
-    size_t total_chunks = (total_size + chunk_size - 1) / chunk_size;
-    
-    cout << "Sending " << total_chunks << " chunk(s)...\n";
-    
-    // Envoyer chaque chunk avec retransmission
-    for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
-        size_t offset = chunk_idx * chunk_size;
-        size_t data_size = min(chunk_size, total_size - offset);
+    if (ret > 0) {
+        ssize_t bytes = recvfrom(sock, &response, sizeof(response), 0,
+                                (sockaddr*)&from, &from_len);
         
-        UdpPacketHeader header{};
-        header.packet_id = chunk_idx + 1;
-        header.session_id = session_id;
-        header.packet_type = UDP_DATA;
-        header.total_chunks = total_chunks;
-        header.chunk_index = chunk_idx;
-        header.data_size = data_size;
-        
-        // Créer paquet
-        vector<uint8_t> packet(sizeof(header) + data_size);
-        memcpy(packet.data(), &header, sizeof(header));
-        memcpy(packet.data() + sizeof(header), data_ptr + offset, data_size);
-        
-        // Envoyer avec retransmission
-        bool ack_received = false;
-        for (int attempt = 0; attempt < UDP_MAX_RETRIES && !ack_received; attempt++) {
-            if (attempt > 0) {
-                cout << "  Retransmitting chunk " << chunk_idx << " (attempt " << attempt+1 << ")\n";
-            }
+        if (bytes > 0) {
+            response.data[min((size_t)bytes - sizeof(UdpHeader), sizeof(response.data) - 1)] = '\0';
             
-            // Envoyer
-            ssize_t sent = sendto(sock, packet.data(), packet.size(), 0,
-                                 (sockaddr*)&server_addr, sizeof(server_addr));
-            
-            if (sent != (ssize_t)packet.size()) {
-                perror("sendto");
-                continue;
-            }
-            
-            // Attendre ACK
-            UdpPacketHeader ack_header{};
-            sockaddr_in from_addr{};
-            socklen_t from_len = sizeof(from_addr);
-            
-            ssize_t recv_bytes = recvfrom(sock, &ack_header, sizeof(ack_header), 0,
-                                         (sockaddr*)&from_addr, &from_len);
-            
-            if (recv_bytes == sizeof(ack_header) &&
-                ack_header.packet_type == UDP_ACK &&
-                ack_header.packet_id == header.packet_id &&
-                ack_header.session_id == session_id) {
-                ack_received = true;
-                cout << "  ✓ Chunk " << chunk_idx << " acknowledged\n";
-            }
-        }
-        
-        if (!ack_received) {
-            cerr << "Error: Failed to send chunk " << chunk_idx << " after " 
-                 << UDP_MAX_RETRIES << " attempts\n";
-            cerr << "Lost connection with server\n";
-            close(sock);
-            return false;
-        }
-    }
-    
-    // Envoyer FIN
-    UdpPacketHeader fin_header{};
-    fin_header.packet_id = 0;
-    fin_header.session_id = session_id;
-    fin_header.packet_type = UDP_FIN;
-    
-    sendto(sock, &fin_header, sizeof(fin_header), 0,
-           (sockaddr*)&server_addr, sizeof(server_addr));
-    
-    cout << "✓ All data sent and acknowledged\n";
-    cout << "Waiting for response...\n";
-    
-    // Recevoir réponse
-    vector<string> response_chunks;
-    bool fin_received = false;
-    
-    while (!fin_received) {
-        UdpPacketHeader resp_header{};
-        sockaddr_in from_addr{};
-        socklen_t from_len = sizeof(from_addr);
-        
-        // Lire header
-        ssize_t bytes = recvfrom(sock, &resp_header, sizeof(resp_header), MSG_PEEK,
-                                (sockaddr*)&from_addr, &from_len);
-        
-        if (bytes == sizeof(resp_header) && resp_header.session_id == session_id) {
-            if (resp_header.packet_type == UDP_DATA) {
-                // Lire données complètes
-                vector<uint8_t> buffer(sizeof(resp_header) + resp_header.data_size);
-                bytes = recvfrom(sock, buffer.data(), buffer.size(), 0,
-                                (sockaddr*)&from_addr, &from_len);
-                
-                if (bytes > 0) {
-                    string chunk_data(reinterpret_cast<char*>(buffer.data() + sizeof(resp_header)),
-                                     resp_header.data_size);
-                    response_chunks.push_back(chunk_data);
-                    
-                    // Envoyer ACK
-                    UdpPacketHeader ack{};
-                    ack.packet_id = resp_header.packet_id;
-                    ack.session_id = session_id;
-                    ack.packet_type = UDP_ACK;
-                    sendto(sock, &ack, sizeof(ack), 0,
-                          (sockaddr*)&from_addr, from_len);
+            if (strncmp(response.data, "OK ", 3) == 0) {
+                auto parts = split_ws(response.data);
+                if (parts.size() >= 3) {
+                    cout << "\n=== RÉSULTAT (UDP) ===" << endl;
+                    cout << "Longueur du chemin: " << parts[1] << endl;
+                    cout << "Chemin: ";
+                    int path_size = stoi(parts[2]);
+                    for (int i = 0; i < path_size; i++) {
+                        cout << parts[3 + i];
+                        if (i < path_size - 1) cout << " → ";
+                    }
+                    cout << endl;
                 }
-            } 
-            else if (resp_header.packet_type == UDP_FIN) {
-                recvfrom(sock, &resp_header, sizeof(resp_header), 0,
-                        (sockaddr*)&from_addr, &from_len);
-                fin_received = true;
+            } else {
+                cout << "ERREUR serveur: " << response.data << endl;
             }
-            else if (resp_header.packet_type == UDP_ERROR) {
-                recvfrom(sock, &resp_header, sizeof(resp_header), 0,
-                        (sockaddr*)&from_addr, &from_len);
-                cerr << "Error from server\n";
-                close(sock);
-                return false;
-            }
-        } else if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            perror("recvfrom");
-            break;
         }
-    }
-    
-    // Reconstruire réponse
-    string full_response;
-    for (const auto& chunk : response_chunks) {
-        full_response += chunk;
-    }
-    
-    // Parser réponse
-    vector<string> tokens = split_ws(full_response);
-    if (tokens.size() >= 3 && tokens[0] == "OK") {
-        cout << "\n=== RESULT (UDP reliable) ===\n";
-        cout << "Path length: " << tokens[1] << "\n";
-        
-        int path_size = stoi(tokens[2]);
-        cout << "Path: ";
-        for (int i = 0; i < path_size; i++) {
-            cout << tokens[3 + i];
-            if (i < path_size - 1) cout << " -> ";
-        }
-        cout << "\n";
     } else {
-        cout << "Error: Invalid response from server\n";
-        close(sock);
-        return false;
+        cerr << "Timeout: Pas de réponse du serveur" << endl;
     }
     
     close(sock);
     return true;
 }
 
-// ---- Main ----
+// ==================== MAIN ====================
+void show_usage(const char* prog) {
+    cout << "Usage:\n";
+    cout << "  " << prog << " <IP> <TCP|UDP> <PORT>\n";
+    cout << "  " << prog << "                  (mode interactif)\n";
+    cout << "Exemples:\n";
+    cout << "  " << prog << " 127.0.0.1 TCP 8080\n";
+    cout << "  " << prog << " 192.168.1.10 UDP 9090\n";
+}
+
 int main(int argc, char* argv[]) {
-    // Mode ligne de commande
-    if (argc > 1) {
-        string ip, filename;
-        int proto, port;
+    cout << "=== Client Graphes Théorie (3ème année) ===\n";
+    cout << "Poids d'arêtes: non-négatifs arbitraires\n";
+    
+    if (argc == 4) {
+        // Mode ligne de commande
+        string server_ip = argv[1];
+        string protocol_str = argv[2];
+        int port;
         
-        if (!parse_arguments(argc, argv, ip, proto, port, filename)) {
+        transform(protocol_str.begin(), protocol_str.end(), protocol_str.begin(), ::toupper);
+        
+        try {
+            port = stoi(argv[3]);
+        } catch (...) {
+            cerr << "Port invalide\n";
             show_usage(argv[0]);
             return 1;
         }
         
-        // Obtenir données
-        int n, m, s, t;
-        vector<vector<int8_t>> inc;
-        vector<int16_t> weights;
+        int proto = (protocol_str == "TCP") ? 1 : 
+                   (protocol_str == "UDP") ? 2 : 0;
         
-        if (!get_graph_data(n, m, s, t, inc, weights, filename)) {
-            if (!exit_requested) {
-                cerr << "Failed to get graph data\n";
-            }
+        if (proto == 0 || port < 1 || port > 65535) {
+            show_usage(argv[0]);
+            return 1;
+        }
+        
+        // Obtenir données du graphe
+        int n, m, s, t;
+        vector<int> mat, weights;
+        
+        if (!get_graph_data(n, m, s, t, mat, weights)) {
             return 0;
         }
         
         // Envoyer selon protocole
-        bool success = false;
         if (proto == 1) {
-            success = send_tcp(ip, port, n, m, s, t, inc, weights);
-        } else if (proto == 2) {
-            success = send_udp_reliable(ip, port, n, m, s, t, inc, weights);
+            send_tcp(server_ip, port, n, m, s, t, mat, weights);
+        } else {
+            send_udp(server_ip, port, n, m, s, t, mat, weights);
         }
         
-        if (!success) {
-            cerr << "Failed to communicate with server\n";
-            return 1;
-        }
-        
-        return 0;
-    }
-    
-    // Mode interactif
-    cout << "=== Graph Theory Client (Interactive Mode) ===\n";
-    cout << "Type 'exit' at any prompt to quit\n\n";
-    
-    while (!exit_requested) {
-        // Demander données
-        int n, m, s, t;
-        vector<vector<int8_t>> inc;
-        vector<int16_t> weights;
-        
-        if (!get_graph_data(n, m, s, t, inc, weights)) {
-            break;
-        }
-        
-        // Demander protocole
-        int proto = 0;
-        while (proto == 0 && !exit_requested) {
-            cout << "\nProtocol? (1=TCP, 2=UDP, exit): ";
-            string input;
-            getline(cin, input);
+    } else if (argc == 1) {
+        // Mode interactif
+        while (true) {
+            cout << "\n=== Nouvelle Requête ===\n";
             
-            if (input == "exit") {
-                exit_requested = true;
+            // Demander protocole
+            cout << "Protocole (TCP/UDP/exit): ";
+            string protocol_str;
+            cin >> protocol_str;
+            transform(protocol_str.begin(), protocol_str.end(), protocol_str.begin(), ::toupper);
+            
+            if (protocol_str == "EXIT") {
+                cout << "Au revoir!\n";
                 break;
             }
             
-            if (input == "1") proto = 1;
-            else if (input == "2") proto = 2;
-            else cout << "Invalid choice\n";
-        }
-        
-        if (exit_requested) break;
-        
-        // Demander IP
-        string ip;
-        while (ip.empty() && !exit_requested) {
-            cout << "Server IP (default: 127.0.0.1): ";
-            getline(cin, ip);
-            
-            if (ip == "exit") {
-                exit_requested = true;
-                break;
+            if (protocol_str != "TCP" && protocol_str != "UDP") {
+                cerr << "Protocole invalide\n";
+                continue;
             }
             
-            if (ip.empty()) ip = "127.0.0.1";
-        }
-        
-        if (exit_requested) break;
-        
-        // Demander port
-        int port = 0;
-        while (port == 0 && !exit_requested) {
-            cout << "Server port: ";
-            string input;
-            getline(cin, input);
+            // Demander IP et port
+            cout << "IP du serveur: ";
+            string server_ip;
+            cin >> server_ip;
+            if (server_ip == "exit") break;
             
-            if (input == "exit") {
-                exit_requested = true;
-                break;
-            }
+            cout << "Port: ";
+            string port_str;
+            cin >> port_str;
+            if (port_str == "exit") break;
             
+            int port;
             try {
-                port = stoi(input);
-                if (port < 1 || port > 65535) {
-                    cout << "Port must be 1-65535\n";
-                    port = 0;
-                }
+                port = stoi(port_str);
             } catch (...) {
-                cout << "Invalid port\n";
+                cerr << "Port invalide\n";
+                continue;
+            }
+            
+            // Obtenir données du graphe
+            int n, m, s, t;
+            vector<int> mat, weights;
+            
+            if (!get_graph_data(n, m, s, t, mat, weights)) {
+                break;
+            }
+            
+            // Envoyer
+            if (protocol_str == "TCP") {
+                send_tcp(server_ip, port, n, m, s, t, mat, weights);
+            } else {
+                send_udp(server_ip, port, n, m, s, t, mat, weights);
+            }
+            
+            // Continuer?
+            cout << "\nNouvelle requête? (oui/non): ";
+            string response;
+            cin >> response;
+            if (response == "non" || response == "exit") {
+                cout << "Au revoir!\n";
+                break;
             }
         }
-        
-        if (exit_requested) break;
-        
-        // Envoyer
-        bool success = false;
-        if (proto == 1) {
-            success = send_tcp(ip, port, n, m, s, t, inc, weights);
-        } else if (proto == 2) {
-            success = send_udp_reliable(ip, port, n, m, s, t, inc, weights);
-        }
-        
-        if (!success) {
-            cout << "Failed to communicate with server\n";
-        }
-        
-        // Continuer?
-        cout << "\nPress Enter to continue or type 'exit' to quit: ";
-        string choice;
-        getline(cin, choice);
-        
-        if (choice == "exit") {
-            break;
-        }
-        
-        cout << "\n" << string(50, '=') << "\n\n";
+    } else {
+        show_usage(argv[0]);
+        return 1;
     }
     
-    cout << "\nGoodbye!\n";
     return 0;
 }
