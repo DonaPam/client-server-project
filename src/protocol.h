@@ -4,11 +4,12 @@
 #include <cstdint>
 #include <cstring>
 
-constexpr int MAX_VERTICES = 20;
-constexpr int MAX_EDGES = 20;
+constexpr int MAX_VERTICES = 200;
+constexpr int MAX_EDGES = 400;
 constexpr int UDP_MAX_RETRIES = 3;
 constexpr int UDP_TIMEOUT_MS = 3000;
 
+// Types de paquets UDP
 enum UdpPacketType : uint8_t {
     UDP_DATA = 0,
     UDP_ACK = 1,
@@ -16,27 +17,28 @@ enum UdpPacketType : uint8_t {
     UDP_ERROR = 3
 };
 
-#pragma pack(push, 1)
+// Header pour chaque paquet UDP (fiable)
 struct UdpPacketHeader {
-    uint32_t packet_id;
-    uint32_t session_id;
-    uint8_t packet_type;
-    uint8_t total_chunks;
-    uint8_t chunk_index;
-    uint8_t reserved;
-    uint32_t data_size;
+    uint32_t packet_id;      // ID unique du paquet
+    uint32_t session_id;     // ID de session client
+    uint8_t packet_type;     // UdpPacketType
+    uint8_t total_chunks;    // Nombre total de chunks
+    uint8_t chunk_index;     // Index actuel (0-based)
+    uint8_t reserved;        // Alignement
+    uint32_t data_size;      // Taille des données utiles
 };
-#pragma pack(pop)
 
+// Structure compacte pour les données de graphe (UDP)
 struct GraphDataUdp {
-    uint16_t vertices;
-    uint16_t edges;
+    uint16_t vertices;       // n (0-65535)
+    uint16_t edges;          // m (0-65535)
     uint16_t start_node;
     uint16_t end_node;
-    int8_t inc_matrix[20][20];
-    int16_t weights[20];
+    int8_t inc_matrix[MAX_VERTICES][MAX_EDGES]; // -128..127
+    int16_t weights[MAX_EDGES]; // -32768..32767
 };
 
+// Request TCP (inchangé mais aligné)
 struct GraphRequest {
     int vertices;
     int edges;
@@ -46,12 +48,13 @@ struct GraphRequest {
     int padding;
 };
 
+// Response TCP
 struct GraphResponse {
     int path_length;
     int path_size;
-    int path[20];
+    int path[MAX_VERTICES];
     int error_code;
     char message[128];
 };
 
-#endif
+#endif // PROTOCOL_H
