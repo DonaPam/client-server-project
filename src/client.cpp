@@ -63,123 +63,220 @@ bool parse_arguments(int argc, char* argv[], string& server_ip, int& proto, int&
 }
 
 /* -----------------------------------------------------------------------
- *  GRAPH DATA INPUT (manual OR file) - supports "exit" at any prompt
+ *  GRAPH DATA INPUT
+ * ----------------------------------------------------------------------- */
+
+/* -----------------------------------------------------------------------
+ *  GRAPH DATA INPUT (avec fichier + exit amélioré)
  * ----------------------------------------------------------------------- */
 
 bool get_graph_data(int& n, int& m, int& s, int& t, 
                     vector<int>& mat, vector<int>& weights)
 {
-    cout << "=== Graph Data Input ===\n";
+    cout << "Graph Data Input \n";
     cout << "Type 'exit' at any prompt to quit.\n\n";
 
-    cout << "■ Data source?\n"
+    cout << "Data source?\n"
          << "1 = manual input\n"
          << "2 = load from .txt file\n"
          << "3 = exit\n> ";
+    
     string choice;
     if(!(cin >> choice)) return false;
-    if(choice == "exit" || choice == "3") { cout<<"Goodbye!\n"; return false; }
+    
+    if(choice == "exit" || choice == "3") { 
+        cout << "Goodbye!\n"; 
+        return false; 
+    }
 
     int mode = 0;
-    try { mode = stoi(choice); } catch(...) { cerr<<"Invalid input\n"; return false; }
+    try { 
+        mode = stoi(choice); 
+        if(mode != 1 && mode != 2) throw 1;
+    } catch(...) { 
+        cerr << "Invalid choice\n"; 
+        return false; 
+    }
 
     if(mode == 2){
-        // file mode
+        // ========== LECTURE DEPUIS FICHIER ==========
         string filename;
-        cout << "File name (or 'exit' to quit): ";
+        cout << "File name (or 'exit'): ";
         if(!(cin >> filename)) return false;
-        if(filename == "exit"){ cout<<"Goodbye!\n"; return false; }
+        
+        if(filename == "exit") { 
+            cout << "Goodbye!\n"; 
+            return false; 
+        }
 
         ifstream fin(filename);
-        if(!fin){ cerr<<"Unable to open file\n"; return false; }
+        if(!fin){ 
+            cerr << "Unable to open file: " << filename << "\n"; 
+            return false; 
+        }
 
-        if(!(fin >> n >> m)){ cerr<<"Invalid file: missing n m\n"; return false; }
-        if(!(fin >> s >> t)){ cerr<<"Invalid file: missing s t\n"; return false; }
+        // Lire n, m, s, t
+        if(!(fin >> n >> m >> s >> t)){
+            cerr << "Invalid file format: missing n,m,s,t\n";
+            return false;
+        }
 
+        // Validation
         if(!(n>=6 && n<20 && m>=6 && m<20)){
-            cerr<<"Error: n and m out of bounds [6..19]\n"; return false;
+            cerr << "Error: n and m must be in [6,19]\n";
+            return false;
+        }
+        if(s < 0 || s >= n || t < 0 || t >= n){
+            cerr << "Error: start/end vertices out of range\n";
+            return false;
         }
 
-        mat.assign(n*m,0);
-        weights.assign(m,0);
-
-        // Expect m lines: u v w
-        for(int e=0;e<m;e++){
-            int u,v,w;
-            if(!(fin >> u >> v >> w)){ cerr<<"Invalid file format: missing edge data\n"; return false; }
-            if(u<0||u>=n||v<0||v>=n||w<0){ cerr<<"Invalid edge values in file\n"; return false; }
-            mat[u*m + e] = w;
-            mat[v*m + e] = -w;
-            weights[e] = w;
-        }
-
-        cout << "\nFile reading OK ✔\n\n";
-        return true;
-    }
-    else if(mode == 1){
-        // manual interactive mode (preserve 'exit' checks)
-        string tmp;
-
-        // n
-        cout << "Number of vertices [6..19] or 'exit': ";
-        cin >> tmp;
-        if(tmp == "exit"){ cout<<"Goodbye!\n"; return false; }
-        try { n = stoi(tmp); if(n<6||n>=20) throw 1; } catch(...) { cerr<<"Invalid n\n"; return false; }
-
-        // m
-        cout << "Number of edges [6..19] or 'exit': ";
-        cin >> tmp;
-        if(tmp == "exit"){ cout<<"Goodbye!\n"; return false; }
-        try { m = stoi(tmp); if(m<6||m>=20) throw 1; } catch(...) { cerr<<"Invalid m\n"; return false; }
-
-        // s
-        cout << "Start vertex (0.." << (n-1) << ") or 'exit': ";
-        cin >> tmp;
-        if(tmp == "exit"){ cout<<"Goodbye!\n"; return false; }
-        try { s = stoi(tmp); if(s<0||s>=n) throw 1; } catch(...) { cerr<<"Invalid start\n"; return false; }
-
-        // t
-        cout << "End vertex (0.." << (n-1) << ") or 'exit': ";
-        cin >> tmp;
-        if(tmp == "exit"){ cout<<"Goodbye!\n"; return false; }
-        try { t = stoi(tmp); if(t<0||t>=n) throw 1; } catch(...) { cerr<<"Invalid end\n"; return false; }
-
-        // initialize
+        // Initialiser
         mat.assign(n*m, 0);
         weights.assign(m, 0);
 
-        cout<<"\nEnter "<<m<<" edges in incidence form (u v w) or 'exit' to quit.\n";
-        cout<<" u = vertex with +w, v = vertex with -w, w = non-negative weight\n\n";
-
+        // Lire les arêtes
         for(int e=0; e<m; e++){
-            cout<<"Edge "<<e<<" : ";
-            string u_str;
-            if(!(cin >> u_str)) return false;
-            if(u_str == "exit"){ cout<<"Goodbye!\n"; return false; }
-            string v_str, w_str;
-            if(!(cin >> v_str)) return false;
-            if(v_str == "exit"){ cout<<"Goodbye!\n"; return false; }
-            if(!(cin >> w_str)) return false;
-            if(w_str == "exit"){ cout<<"Goodbye!\n"; return false; }
-
-            int u,v,w;
-            try {
-                u = stoi(u_str); v = stoi(v_str); w = stoi(w_str);
-                if(u<0||u>=n||v<0||v>=n||w<0) throw 1;
-            } catch(...) {
-                cerr<<"Invalid edge\n"; return false;
+            int u, v, w;
+            if(!(fin >> u >> v >> w)){
+                cerr << "Invalid file format: missing edge data\n";
+                return false;
+            }
+            
+            // Validation de l'arête
+            if(u < 0 || u >= n || v < 0 || v >= n || w < 0){
+                cerr << "Error: invalid edge values in file (edge " << e << ")\n";
+                return false;
             }
 
             mat[u*m + e] = w;
             mat[v*m + e] = -w;
             weights[e] = w;
         }
+
+        cout << "\n✓ File reading successful\n\n";
         return true;
     }
-    else {
-        cerr<<"Invalid choice\n";
-        return false;
+    else if(mode == 1){
+        // ========== SAISIE MANUELLE (ton code existant avec 'exit' ajouté) ==========
+        string tmp;
+
+        // n avec 'exit'
+        cout << "Number of vertices [6..19] or 'exit': ";
+        cin >> tmp;
+        if (tmp == "exit") { 
+            cout << "Goodbye!\n"; 
+            return false; 
+        }
+        try { 
+            n = stoi(tmp); 
+            if(n<6||n>=20) throw 1; 
+        } catch(...) {
+            cerr << "Invalid n\n"; 
+            return false;
+        }
+
+        // m avec 'exit'
+        cout << "Number of edges [6..19] or 'exit': ";
+        cin >> tmp;
+        if (tmp == "exit") { 
+            cout << "Goodbye!\n"; 
+            return false; 
+        }
+        try { 
+            m = stoi(tmp); 
+            if(m<6||m>=20) throw 1; 
+        } catch(...) {
+            cerr << "Invalid m\n"; 
+            return false;
+        }
+
+        // s avec 'exit'
+        cout << "Start vertex (0.." << (n-1) << ") or 'exit': ";
+        cin >> tmp;
+        if (tmp == "exit") { 
+            cout << "Goodbye!\n"; 
+            return false; 
+        }
+        try { 
+            s = stoi(tmp); 
+            if(s<0||s>=n) throw 1; 
+        } catch(...) {
+            cerr << "Invalid start\n"; 
+            return false;
+        }
+
+        // t avec 'exit'
+        cout << "End vertex (0.." << (n-1) << ") or 'exit': ";
+        cin >> tmp;
+        if (tmp == "exit") { 
+            cout << "Goodbye!\n"; 
+            return false; 
+        }
+        try { 
+            t = stoi(tmp); 
+            if(t<0||t>=n) throw 1; 
+        } catch(...) {
+            cerr << "Invalid end\n"; 
+            return false;
+        }
+
+        // initialize
+        mat.assign(n*m, 0);
+        weights.assign(m, 0);
+
+        cout<<"\nEnter "<<m<<" edges in incidence form.\n";
+        cout<<"For each edge e, enter: u v w\n"
+            <<"  u = vertex with +w\n"
+            <<"  v = vertex with -w\n"
+            <<"  w = non-negative weight\n";
+        cout<<"Type 'exit' at any time to quit.\n\n";
+
+        for(int e=0; e<m; e++){
+            cout<<"Edge "<<e<<": ";
+            string u_str, v_str, w_str;
+            
+            // u
+            cin >> u_str;
+            if(u_str == "exit") { 
+                cout << "Goodbye!\n"; 
+                return false; 
+            }
+            
+            // v  
+            cin >> v_str;
+            if(v_str == "exit") { 
+                cout << "Goodbye!\n"; 
+                return false; 
+            }
+            
+            // w
+            cin >> w_str;
+            if(w_str == "exit") { 
+                cout << "Goodbye!\n"; 
+                return false; 
+            }
+
+            int u,v,w;
+            try {
+                u = stoi(u_str); 
+                v = stoi(v_str); 
+                w = stoi(w_str);
+                if(u<0||u>=n||v<0||v>=n||w<0) throw 1;
+            } catch(...) {
+                cerr<<"Invalid edge\n"; 
+                return false;
+            }
+
+            mat[u*m + e] = w;
+            mat[v*m + e] = -w;
+            weights[e] = w;
+        }
+
+        return true;
     }
+    
+    return false;
 }
 
 /* -----------------------------------------------------------------------
