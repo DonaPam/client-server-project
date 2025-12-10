@@ -528,7 +528,7 @@ bool send_graph_to_server(const string& server_ip, int proto, int port,
 }
 
 /* -----------------------------------------------------------------------
- * MAIN
+ * MAIN (avec boucle pour traiter plusieurs graphes)
  * ----------------------------------------------------------------------- */
 
 int main(int argc, char* argv[]){
@@ -544,14 +544,47 @@ int main(int argc, char* argv[]){
     cout << "Server: " << server_ip 
          << ":" << port 
          << " (" << (proto==1?"TCP":"UDP") << ")\n";
+    cout << "Type 'exit' at any prompt to quit.\n\n";
 
-    int n,m,s,t;
-    vector<int> mat, weights;
+    // Boucle principale pour traiter plusieurs graphes
+    while(true){
+        cout << "\n" << string(50, '=') << "\n";
+        cout << "New Graph Calculation\n";
+        cout << string(50, '=') << "\n\n";
 
-    if(!get_graph_data(n,m,s,t,mat,weights))
-        return 0;
+        int n,m,s,t;
+        vector<int> mat, weights;
 
-    send_graph_to_server(server_ip, proto, port, n,m,s,t,mat,weights);
+        // Demander les données du graphe
+        if(!get_graph_data(n,m,s,t,mat,weights)){
+            // Si get_graph_data retourne false, c'est qu'on a tapé "exit"
+            cout << "\nClient terminated.\n";
+            break;
+        }
+
+        // Envoyer au serveur
+        bool success = send_graph_to_server(server_ip, proto, port, n,m,s,t,mat,weights);
+        
+        if(!success){
+            cout << "Failed to communicate with server.\n";
+        }
+
+        // Demander si on veut continuer
+        cout << "\n" << string(40, '-') << "\n";
+        cout << "Would you like to calculate another graph?\n";
+        cout << "Press Enter to continue or type 'exit' to quit: ";
+        
+        string user_input;
+        cin.ignore(); // Nettoyer le buffer
+        getline(cin, user_input);
+        
+        if(user_input == "exit"){
+            cout << "\nGoodbye!\n";
+            break;
+        }
+        
+        // Sinon, on continue la boucle
+    }
 
     return 0;
 }
